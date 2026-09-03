@@ -1112,7 +1112,7 @@ func (s *server) queryLiveMessages(a map[string]any, order string) ([]wcdb.Row, 
 			shardWC = "WHERE " + strings.Join(shardWhere, " AND ")
 		}
 		query := fmt.Sprintf(`SELECT local_id, server_id, local_type, sort_seq,
-			real_sender_id, create_time, status, message_content, source
+			real_sender_id, create_time, status, message_content, packed_info_data, source
 			FROM %s %s
 			ORDER BY %s
 			LIMIT ? OFFSET ?`, quoteIdent(tableName), shardWC, order)
@@ -2558,6 +2558,18 @@ func agentVoiceRefs(r wcdb.Row, referenced bool) ([]map[string]any, []string) {
 }
 
 func agentVoiceTranscript(r wcdb.Row, referenced bool) (map[string]any, []string) {
+	// 微信 GUI 自己已经完成的“语音转文字”会缓存回消息行 packed_info_data。
+	// 这条来源不需要解 SILK、不占 GPU，也不会和用户正在使用的前台 ASR
+	// 抢资源，因此优先级必须高于 wechat-cli 自己的外部转写缓存/引擎。
+	if packed, ok := r["packed_info_data"].([]byte); ok {
+		if text := wxparse.NativeVoiceTranscript(packed); text != "" {
+			return map[string]any{
+				"status": "ok",
+				"text":   text,
+				"engine": "wechat-native",
+			}, nil
+		}
+	}
 	matched := false
 	var warnings []string
 	for _, h := range mapSliceAny(r["media_read_hints"]) {
