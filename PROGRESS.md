@@ -9,7 +9,15 @@
 - 已确认微信原生“语音转文字”不是只能存在 GUI 状态里：完成结果保存在消息表 `packed_info_data` 的 protobuf-like 字段中。现已把该字段加入 live message 查询，并优先按 `field 5 -> status(field 1)=2 -> text(field 2)` 提取为 `engine=wechat-native`；外部 ASR 只保留为没有原生缓存时的可选 fallback。
 - 新增开发回归探针 `cmd/wechat-cli-probe-native-transcripts`：只读扫描所有编号 message shard，直接复用 WCDB reader + `NativeVoiceTranscript`，用于在真实微信数据库中验证原生语音转写缓存链路。
 - 真库探针已命中多条微信原生转写；进一步用正式 `context` 交叉验证时发现 context 专用 SELECT 漏取 `packed_info_data`，现已补齐，避免 timeline 与 context/search-context 对同一语音产生不一致输出。
+- 晋升条件已满足：真实 `context` 已对命中样本返回 `engine=wechat-native / status=ok`，正文直接进入 Agent 消息文本；图片、朋友圈、收藏、跨 shard、搜索/上下文/导出此前也均已通过当前机器真数据验证。
 - 下一步：运行 CLI 回归测试、全库类型扫描、重点媒体/复杂消息抽样；只修影响 AI 完整理解的缺口。
+
+## 本机固定路径
+- 正式源码仓库：`D:\Workspace\WeChatCLI`
+- 正式运行包：`D:\App\wechat-cli`
+- 全局命令入口：`C:\Users\ZJHSteven\bin\wechat-cli.cmd`（该目录已在 PATH）
+- 运行方式：默认一次性进程，命令执行完即退出；只有显式使用 `tail/watch --follow` 时才持续运行，不安装常驻守护进程。
+- `D:\Workspace\WeChatCliBench` 只保留回归样本与其他对照项目，不再作为正式源码位置。
 
 ## 关键决策与理由
 - 主底座选 `wechat-cli`：CLI/Agent 契约已经完整，避免重复从 `wechatauto-replica` 手写一套命令层。
