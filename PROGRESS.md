@@ -8,6 +8,7 @@
 - 第一版内置图片扫描在多 Weixin 子进程场景耗时偏长；已改为优先扫描 DB key 实际命中的 `KeyPID`，并把 ASCII 候选识别改成线性 run 扫描，避免逐字节 32 次重复检查。
 - 已确认微信原生“语音转文字”不是只能存在 GUI 状态里：完成结果保存在消息表 `packed_info_data` 的 protobuf-like 字段中。现已把该字段加入 live message 查询，并优先按 `field 5 -> status(field 1)=2 -> text(field 2)` 提取为 `engine=wechat-native`；外部 ASR 只保留为没有原生缓存时的可选 fallback。
 - 新增开发回归探针 `cmd/wechat-cli-probe-native-transcripts`：只读扫描所有编号 message shard，直接复用 WCDB reader + `NativeVoiceTranscript`，用于在真实微信数据库中验证原生语音转写缓存链路。
+- 真库探针已命中多条微信原生转写；进一步用正式 `context` 交叉验证时发现 context 专用 SELECT 漏取 `packed_info_data`，现已补齐，避免 timeline 与 context/search-context 对同一语音产生不一致输出。
 - 下一步：运行 CLI 回归测试、全库类型扫描、重点媒体/复杂消息抽样；只修影响 AI 完整理解的缺口。
 
 ## 关键决策与理由

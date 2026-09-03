@@ -283,8 +283,12 @@ func (s *server) queryContextRows(shards []msgShardDB, tableName, where string, 
 	for _, shard := range shards {
 		qargs := append([]any(nil), args...)
 		qargs = append(qargs, shardLimit)
+		// context 必须和主 timeline 查询携带相同的消息元数据。尤其是
+		// packed_info_data：微信原生“语音转文字”结果就缓存于此；若这里漏掉，
+		// 同一条语音在 timeline 中可显示 wechat-native transcript，而在
+		// context/search-context 中却会错误退化成 local_asr/unavailable。
 		shardRows, err := shard.DB.Query(fmt.Sprintf(`SELECT local_id, server_id, local_type, sort_seq,
-			real_sender_id, create_time, status, message_content, source
+			real_sender_id, create_time, status, message_content, packed_info_data, source
 			FROM %s WHERE %s
 			ORDER BY %s LIMIT ?`, quoteIdent(tableName), where, order), qargs...)
 		if err != nil {
