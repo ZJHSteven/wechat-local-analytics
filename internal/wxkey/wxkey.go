@@ -114,6 +114,13 @@ func RunSetup() (*SetupResult, string, error) {
 }
 
 func RunImageKey(root string) (*ImageKeyResult, string, error) {
+	return runImageKey(root)
+}
+
+// runImageKeyExternal 保留原 release 中“调用独立 wxkey helper”的实现。
+// macOS 等平台仍然走这条路径；Windows 现在由 image_key_windows.go 提供
+// 进程内只读扫描实现，避免 DMCA 后幸存源码缺少 wxkey.exe 时图片能力断掉。
+func runImageKeyExternal(root string) (*ImageKeyResult, string, error) {
 	bin, err := FindBinary()
 	if err != nil {
 		return nil, "", err
