@@ -5,6 +5,7 @@
 - 已完成：找到 r266 幸存源码；Windows 编译成功；构建 SQLCipher 兼容 `libWCDB.dll`；首次 `cache refresh --force` 成功获取 24 个 DB key；仝立炎已知窗口返回精确 73 条。
 - 正在做：基于用户刚从手机回灌后的更完整历史，重新建立全库回归基线；调查微信原生语音转写缓存。回灌后 cache 已从 24 个 DB key / 855 会话增长到 26 个 DB key / 1238 会话。
 - 图片 key 根因已定位：幸存源码的 Windows DB key 已内置扫描，但 `RunImageKey` 仍硬依赖原 release 的 `wxkey.exe`；DMCA 后该 helper 缺失，导致每次图片读取都只留下 `image_decode_needs_image_key`。现已加入 Windows 进程内图片 key 扫描实现，待真实图片回归验证。
+- 第一版内置图片扫描在多 Weixin 子进程场景耗时偏长；已改为优先扫描 DB key 实际命中的 `KeyPID`，并把 ASCII 候选识别改成线性 run 扫描，避免逐字节 32 次重复检查。
 - 下一步：运行 CLI 回归测试、全库类型扫描、重点媒体/复杂消息抽样；只修影响 AI 完整理解的缺口。
 
 ## 关键决策与理由

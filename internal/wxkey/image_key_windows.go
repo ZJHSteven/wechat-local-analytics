@@ -60,6 +60,21 @@ func runImageKey(root string) (*ImageKeyResult, string, error) {
 	if len(procs) == 0 {
 		return nil, "", fmt.Errorf("no running Weixin.exe/WeChat.exe process found; log in to Windows WeChat first")
 	}
+	// DB key 扫描已经记录了真正命中过密钥的 KeyPID。图片 AES key 通常也在
+	// 同一个主进程里，优先扫描它可以避免先把多个 renderer/helper 子进程扫完。
+	// 这既显著降低耗时，也减少对工作集较大的微信实例做无意义 ReadProcessMemory。
+	if cfg, loadErr := config.Load(); loadErr == nil && cfg.KeyPID > 0 {
+		keyPID := uint32(cfg.KeyPID)
+		sort.SliceStable(procs, func(i, j int) bool {
+			if procs[i].pid == keyPID {
+				return true
+			}
+			if procs[j].pid == keyPID {
+				return false
+			}
+			return false
+		})
+	}
 
 	deadline := time.Now().Add(windowsImageKeyScanTimeout())
 	var regions int
@@ -254,30 +269,36 @@ func windowsScanImageRegion(process uintptr, base, size uintptr, probe []byte, s
 // 是候选的前 16 个字符；每个候选都必须通过真实图片密文验证。
 func windowsFindImageKeyInBytes(data, probe []byte, seen map[string]bool) (string, int) {
 	tried := 0
-	for i := 1; i+33 <= len(data); i++ {
-		if isImageKeyChar(data[i-1]) || isImageKeyChar(data[i+32]) {
+	// ASCII 路径按“连续字母数字 run”扫描，而不是对每个字节都向后重查
+	// 32 次。进程内存通常数百 MB，这个线性写法能把扫描成本降一个数量级。
+	for i := 0; i < len(data); {
+		if !isImageKeyChar(data[i]) {
+			i++
 			continue
 		}
-		ok := true
-		for j := 0; j < 32; j++ {
-			if !isImageKeyChar(data[i+j]) {
-				ok = false
-				break
-			}
+		start := i
+		for i < len(data) && isImageKeyChar(data[i]) {
+			i++
 		}
-		if ok {
-			key := string(data[i : i+16])
-			if !seen[key] {
-				seen[key] = true
-				tried++
-				if windowsImageKeyValid(key, probe) {
-					return key, tried
-				}
+		if i-start != 32 {
+			continue
+		}
+		key := string(data[start : start+16])
+		if !seen[key] {
+			seen[key] = true
+			tried++
+			if windowsImageKeyValid(key, probe) {
+				return key, tried
 			}
 		}
 	}
 
-	for i := 0; i+64 <= len(data); i++ {
+	// UTF-16LE 仍按可能的起点探测，但失败时尽量跳过明显不可能的区域。
+	for i := 0; i+64 <= len(data); {
+		if !isImageKeyChar(data[i]) || data[i+1] != 0 {
+			i++
+			continue
+		}
 		ok := true
 		chars := make([]byte, 32)
 		for j := 0; j < 32; j++ {
@@ -289,10 +310,12 @@ func windowsFindImageKeyInBytes(data, probe []byte, seen map[string]bool) (strin
 			chars[j] = c
 		}
 		if !ok {
+			i += 2
 			continue
 		}
 		key := string(chars[:16])
 		if seen[key] {
+			i += 64
 			continue
 		}
 		seen[key] = true
@@ -300,6 +323,7 @@ func windowsFindImageKeyInBytes(data, probe []byte, seen map[string]bool) (strin
 		if windowsImageKeyValid(key, probe) {
 			return key, tried
 		}
+		i += 64
 	}
 	return "", tried
 }
