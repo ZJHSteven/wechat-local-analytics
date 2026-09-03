@@ -18,6 +18,7 @@
 - 全局命令入口：`C:\Users\ZJHSteven\bin\wechat-cli.cmd`（该目录已在 PATH）
 - 运行方式：默认一次性进程，命令执行完即退出；只有显式使用 `tail/watch --follow` 时才持续运行，不安装常驻守护进程。
 - `D:\Workspace\WeChatCliBench` 只保留回归样本与其他对照项目，不再作为正式源码位置。
+- 2026-09-03 已完成正式迁移与全局安装；从 `C:\` 冷启动验证 `status`、真实 `wechat-native` 语音、图片解密、朋友圈和收藏均成功。Bench 中旧 `wechat-local-analytics` 源码副本已删除，避免双仓库歧义。
 
 ## 关键决策与理由
 - 主底座选 `wechat-cli`：CLI/Agent 契约已经完整，避免重复从 `wechatauto-replica` 手写一套命令层。
