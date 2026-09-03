@@ -7,9 +7,9 @@ import "strings"
 //
 // 这里故意只接受已经确认过的精确 protobuf-like 路径：
 //
-//   top-level field 5 (length-delimited)
-//       -> nested field 1 = 2   // status=completed
-//       -> nested field 2       // UTF-8 transcript
+//	top-level field 5 (length-delimited)
+//	    -> nested field 1 = 2   // status=completed
+//	    -> nested field 2       // UTF-8 transcript
 //
 // 不做“在 blob 里搜可打印字符串”之类的猜测，否则很容易把其它元数据、
 // wxid 或 URL 误识别成语音文字。解析失败、状态未完成、UTF-8 非法时都返回
