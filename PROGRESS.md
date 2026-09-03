@@ -3,7 +3,7 @@
 ## 当前结论（必须最新）
 - 现状：`wechat-cli` 1.6.20 已在 Windows 微信 4.1.9.57 + Sandboxie 环境完成 DB key、会话解析、timeline、search、JSONL/Markdown 导出的真实数据验证。
 - 已完成：找到 r266 幸存源码；Windows 编译成功；构建 SQLCipher 兼容 `libWCDB.dll`；首次 `cache refresh --force` 成功获取 24 个 DB key；仝立炎已知窗口返回精确 73 条。
-- 正在做：基于用户刚从手机回灌后的更完整历史，重新建立全库回归基线；调查 image key 与微信原生语音转写缓存。
+- 正在做：基于用户刚从手机回灌后的更完整历史，重新建立全库回归基线；调查 image key 与微信原生语音转写缓存。回灌后 cache 已从 24 个 DB key / 855 会话增长到 26 个 DB key / 1238 会话。
 - 下一步：运行 CLI 回归测试、全库类型扫描、重点媒体/复杂消息抽样；只修影响 AI 完整理解的缺口。
 
 ## 关键决策与理由
@@ -18,3 +18,4 @@
 - DB key 与图片 key 不是同一套材料；“24/24 DB key 成功”不能推出 V2 `.dat` 图片一定可解。
 - 同一联系人消息跨 `message_0.db` / `message_1.db` 等 shard；只取第一个匹配表会漏历史。
 - 未知 subtype 必须保留 raw XML/原始字段并输出 warning，不能解释成“没有这条消息”。
+- Windows Git Bash/MSYS 在 NTFS 上可能让 `chmod 700` 返回 Permission denied；回归脚本已改为 Windows 只创建输出目录，不把 POSIX mode 当成产品能力测试。

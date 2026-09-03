@@ -7,8 +7,16 @@ KEYWORD="${WECHAT_READ_TEST_KEYWORD:-}"
 OUT="${WECHAT_READ_TEST_OUT:-${TMPDIR:-/tmp}/wechat-read-regression-$(date +%Y%m%d-%H%M%S)}"
 ALLOW_EMPTY_SEARCH="${WECHAT_READ_ALLOW_EMPTY_SEARCH:-0}"
 
-mkdir -p -m 700 "$OUT"
-chmod 700 "$OUT"
+# Linux/macOS 可以直接依赖 POSIX mode；Git Bash/MSYS 跑在 Windows/NTFS 上时，
+# `chmod 700` 可能返回 Permission denied，虽然目录本身已经创建成功且可正常写入。
+# 回归脚本的目的不是测试 NTFS ACL，因此 Windows 下只保留“创建目录”这个必要动作，
+# 避免因为无关的权限语义差异把完整的 Windows 真机回归提前中止。
+if [[ "${OSTYPE:-}" == msys* || "${OSTYPE:-}" == cygwin* || "${OSTYPE:-}" == win32* ]]; then
+  mkdir -p "$OUT"
+else
+  mkdir -p -m 700 "$OUT"
+  chmod 700 "$OUT"
+fi
 echo "[info] output: $OUT" >&2
 echo "[warn] regression artifacts contain local WeChat data; do not upload or share this directory" >&2
 
