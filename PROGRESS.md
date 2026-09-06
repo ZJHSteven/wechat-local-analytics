@@ -11,6 +11,11 @@
 - 真库探针已命中多条微信原生转写；进一步用正式 `context` 交叉验证时发现 context 专用 SELECT 漏取 `packed_info_data`，现已补齐，避免 timeline 与 context/search-context 对同一语音产生不一致输出。
 - 晋升条件已满足：真实 `context` 已对命中样本返回 `engine=wechat-native / status=ok`，正文直接进入 Agent 消息文本；图片、朋友圈、收藏、跨 shard、搜索/上下文/导出此前也均已通过当前机器真数据验证。
 - 下一步：运行 CLI 回归测试、全库类型扫描、重点媒体/复杂消息抽样；只修影响 AI 完整理解的缺口。
+- 第二阶段设计已明确：现有 `tail/watch --follow` 实现是每轮 `read_events` 后 `Sleep(poll_interval)`，默认 2 秒轮询；长期 notifier 将改为“文件系统事件唤醒 + cursor 权威补读 + 低频 reconciliation”，不把轮询作为主要实时路径。
+- 通知聚合采用 per-chat trailing debounce + max-wait，而不是每条消息启动 Agent；原始消息先持久化，再由 PI 对 burst 做 `ignore/notify/task/awaiting_reply` 分类。
+- 当前账号磁盘逻辑大小实测约 16.29 GiB：`msg` 约 14.42 GiB，`db_storage` 约 1.56 GiB；真正大头是文件/图片/视频附件，不是消息 SQLite。
+- `message_0..6.db` 实测 `freelist_count=0`；`message_0.db` 为 `secure_delete=1`、`auto_vacuum=0`，当前没有可见的大量 SQLite freelist 空洞。
+- WeChat 4.x 的 `hardlink.db` 确实在做媒体/文件去重；已抽样验证同一 10.6MB PPT 的 4 个不同文件名实际是同一 NTFS 文件的 4 个 hardlink，而不是四份物理副本。
 
 ## 本机固定路径
 - 正式源码仓库：`D:\Workspace\WeChatCLI`
