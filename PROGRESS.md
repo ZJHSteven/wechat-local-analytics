@@ -16,6 +16,12 @@
 - 当前账号磁盘逻辑大小实测约 16.29 GiB：`msg` 约 14.42 GiB，`db_storage` 约 1.56 GiB；真正大头是文件/图片/视频附件，不是消息 SQLite。
 - `message_0..6.db` 实测 `freelist_count=0`；`message_0.db` 为 `secure_delete=1`、`auto_vacuum=0`，当前没有可见的大量 SQLite freelist 空洞。
 - WeChat 4.x 的 `hardlink.db` 确实在做媒体/文件去重；已抽样验证同一 10.6MB PPT 的 4 个不同文件名实际是同一 NTFS 文件的 4 个 hardlink，而不是四份物理副本。
+- 第二阶段 canonical archive 已真实落地在 Sandbox 外：`D:\WeChatArchive\wxid_4mty0mzusr4k12\archive.sqlite`。首次全量扫描 8 个 message/biz shard、1609 个 `Msg_*` 表，共读取 978406 条源行，按稳定消息身份去重后得到 978396 条 canonical 消息；FTS 行数与 canonical 消息严格一致。
+- Archive schema 已升级到 v2，`archive sync` 改为 per-table watermark 幂等增量同步；一次真实增量验收仅处理 612 条新增消息，核心导入耗时约 2.42 秒。命令总耗时目前仍受 1609 张表枚举/打开的固定成本影响，后续可继续用 dirty-shard / MAX(local_id) 预检优化。
+- `archive verify` 已改为按上次同步 watermark 做活数据库一致性验证：最新真实验收为 archive 979030 条、FTS 979030 条、watermark 范围内 `source_missing_in_archive=0`、`archive_only_messages=0`；verify 扫描期间新到的 2 条消息只计入 `new_since_sync=2`，不误报归档损坏。
+- Archive 当前只保存消息事实、raw/canonical JSON、FTS 与媒体清单/状态；尚未把全部媒体实体复制到 Archive。现已识别 2677 个 `local_ready` 文件项和 4813 个 `remote_pending` 文件项，后者是后续自动抢救下载的主要队列。
+- 文件 parser 已补保留普通 AppMsg 的 `cdnattachurl`；合并转发中的嵌套 file item 也会递归进入媒体清单，便于后续优先尝试 CDN 元数据下载，失败再走微信 UI 下载 fallback。
+- 带 Archive 功能的最新 `wechat-cli.exe` 已重新安装到 `D:\App\wechat-cli`；从 `C:\Users\ZJHSteven\bin\wechat-cli.cmd` 全局入口冷启动 `archive status` 验收成功。
 
 ## 本机固定路径
 - 正式源码仓库：`D:\Workspace\WeChatCLI`
