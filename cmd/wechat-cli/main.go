@@ -8085,10 +8085,11 @@ type xmlMsgAppmsg struct {
 		SourceDisplayName string `xml:"sourcedisplayname"`
 		ThumbURL          string `xml:"thumburl"`
 		AppAttach         struct {
-			TotalLen int64  `xml:"totallen"`
-			AttachID string `xml:"attachid"`
-			FileExt  string `xml:"fileext"`
-			AesKey   string `xml:"aeskey"`
+			TotalLen     int64  `xml:"totallen"`
+			AttachID     string `xml:"attachid"`
+			FileExt      string `xml:"fileext"`
+			AesKey       string `xml:"aeskey"`
+			CDNAttachURL string `xml:"cdnattachurl"`
 		} `xml:"appattach"`
 		WcPayInfo struct {
 			FeeDesc       string `xml:"feedesc"`
