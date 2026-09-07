@@ -37,6 +37,15 @@
 - 图片优先归档解码后的 JPEG/PNG；语音保存 SILK + 微信原生 transcript（若有）；视频/文件保存原始本地实体。
 - 不要求 archive 与微信在线数据目录同盘；未来优先迁到家庭服务器。
 
+### 当前实施批次：Windows canonical archive MVP
+1. 在主 CLI 增加 `archive init|sync|status|verify`，默认归档根放在用户可配置目录，不改写微信原始目录。
+2. `archive sync` 直接枚举所有 `message_N.db` 的全部 `Msg_*` 表；以 `(talker, server_id)` 为主身份、`(talker, local_id, create_time)` 为兜底身份做幂等 upsert，禁止只遍历最近 session。
+3. Archive SQLite 至少保存：稳定消息 ID、talker、sender、时间、kind、展示文本、canonical JSON、raw type/subtype、raw XML/packed 字段、parser/version、源 shard。
+4. 同时建立 FTS5 索引，后续让历史搜索优先查询 archive；本批次先验证“全量导入 + 二次 sync 幂等 + verify 数量一致”。
+5. 媒体先建立 manifest/pending 队列：已存在本地实体记录 path/size/hash；消息声明有文件但本地不存在时记录 `remote_pending`，不把消息本体判为失败。
+6. 合并转发中的嵌套 file item 单独提取到 pending-media：优先保存可见文件名、大小、md5、cdn/aes 元数据；后续下载器优先走可验证的远端下载路径，失败才交给微信 UI 自动化触发下载。
+7. 首次全量 archive 验证通过之前禁止清理微信原目录；只有 `archive verify`、抽样读取和 recovery capsule 均通过后才讨论瘦身。
+
 ## 后续阶段
 - 第三阶段：独立 send adapter（UI Automation/RPA/其它可行路线），读写彻底解耦。
 - 第四阶段：家庭服务器托管 Linux 微信/QQ + 监听/归档服务 + 自建 Web UI。
