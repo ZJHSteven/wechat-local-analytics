@@ -31,6 +31,7 @@ import (
 )
 
 const archiveSchemaVersion = 1
+const archiveMinLocalID int64 = -1 << 63
 
 type archiveTalkerMeta struct {
 	Username string
@@ -298,7 +299,7 @@ func (s *server) archiveSyncTable(sourceDB, archiveDB *wcdb.DB, upsertMessage, d
 	if err != nil {
 		return fmt.Errorf("%s/%s schema: %w", shardName, tableName, err)
 	}
-	lastLocalID := int64(-1)
+	lastLocalID := archiveMinLocalID
 	selfWxid := s.selfWxid()
 	for {
 		rows, err := sourceDB.Query(selectSQL, lastLocalID, batchSize)
@@ -875,7 +876,7 @@ func (s *server) archiveSourceIdentities() (map[string]struct{}, int64, int, err
 		}
 		for _, table := range tables {
 			tableCount++
-			last := int64(-1)
+			last := archiveMinLocalID
 			for {
 				rows, err := db.Query(fmt.Sprintf(`SELECT local_id, server_id, create_time FROM %s WHERE local_id > ? ORDER BY local_id ASC LIMIT 5000`, quoteIdent(table)), last)
 				if err != nil {
