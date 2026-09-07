@@ -422,7 +422,7 @@ func (s *server) archiveVerify(a map[string]any) (any, error) {
 	}
 	defer db.Close()
 
-	sourceIDs, sourceRows, sourceTables, err := s.archiveSourceIdentities()
+	sourceIDs, sourceRows, sourceTables, newSinceSync, err := s.archiveSourceIdentitiesAtWatermarks(db)
 	if err != nil {
 		return nil, err
 	}
@@ -468,13 +468,14 @@ func (s *server) archiveVerify(a map[string]any) (any, error) {
 		"source_raw_rows":       sourceRows,
 		"source_unique_messages": len(sourceIDs),
 		"source_duplicate_rows": duplicateSourceRows,
+		"new_since_sync":        newSinceSync,
 		"archive_messages":      len(archiveIDs),
 		"source_missing_in_archive": missingCount,
 		"missing_sample":        missing,
 		"archive_only_messages": archiveOnly,
 		"fts_rows":              ftsCount,
 		"parse_error_rows":      parseErrors,
-		"note":                  "archive-only messages are preserved history and are not a verification failure",
+		"note":                  "verification is bounded by per-table sync watermarks; archive-only history and rows newer than the watermark are not failures",
 	}, nil
 }
 
@@ -684,13 +685,19 @@ END;`
 	if err := db.Exec(schema); err != nil {
 		return fmt.Errorf("create archive schema: %w", err)
 	}
-	// schema v1 的首轮全量库没有 table_state。直接从已经归档的消息回填
-	// 每张表的 watermark，使升级到 v2 后下一次 sync 立刻变成真正增量，
-	// 不会因为“升级 schema”再把近百万消息重跑一遍。
-	if err := db.Exec(`INSERT OR IGNORE INTO table_state(source_shard, source_table, last_local_id, updated_at)
-		SELECT source_shard, source_table, MAX(local_id), strftime('%s','now')
-		FROM messages GROUP BY source_shard, source_table`); err != nil {
-		return fmt.Errorf("backfill archive table watermarks: %w", err)
+	previousVersion := 0
+	if rows, err := db.Query(`SELECT value FROM archive_meta WHERE key='schema_version'`); err == nil && len(rows) > 0 {
+		previousVersion, _ = strconv.Atoi(rowString(rows[0], "value"))
+	}
+	if previousVersion < 2 {
+		// schema v1 的首轮全量库没有 table_state。只在 v1 -> v2 迁移时从
+		// 已经归档的消息回填一次 watermark；正常的每次增量 sync 绝不能
+		// 再扫描近百万条 messages 做 GROUP BY。
+		if err := db.Exec(`INSERT OR IGNORE INTO table_state(source_shard, source_table, last_local_id, updated_at)
+			SELECT source_shard, source_table, MAX(local_id), strftime('%s','now')
+			FROM messages GROUP BY source_shard, source_table`); err != nil {
+			return fmt.Errorf("backfill archive table watermarks: %w", err)
+		}
 	}
 	if err := setArchiveMeta(db, "schema_version", strconv.Itoa(archiveSchemaVersion)); err != nil {
 		return err
@@ -896,32 +903,44 @@ func archiveMessageIdentity(tableName string, row wcdb.Row) string {
 	return fmt.Sprintf("local:%s:%d:%d", strings.ToLower(tableName), rowInt64(row, "local_id"), rowInt64(row, "create_time"))
 }
 
-func (s *server) archiveSourceIdentities() (map[string]struct{}, int64, int, error) {
+func (s *server) archiveSourceIdentitiesAtWatermarks(archiveDB *wcdb.DB) (map[string]struct{}, int64, int, int64, error) {
 	shards, err := s.archiveMessageShardNames()
 	if err != nil {
-		return nil, 0, 0, err
+		return nil, 0, 0, 0, err
 	}
 	ids := map[string]struct{}{}
 	var rawRows int64
+	var newSinceSync int64
 	tableCount := 0
 	for _, shardName := range shards {
 		db, err := s.openDB("message", shardName)
 		if err != nil {
-			return nil, rawRows, tableCount, err
+			return nil, rawRows, tableCount, newSinceSync, err
 		}
 		tables, err := archiveMessageTables(db)
 		if err != nil {
 			db.Close()
-			return nil, rawRows, tableCount, err
+			return nil, rawRows, tableCount, newSinceSync, err
 		}
 		for _, table := range tables {
 			tableCount++
+			watermark, err := archiveTableWatermark(archiveDB, shardName, table)
+			if err != nil {
+				db.Close()
+				return nil, rawRows, tableCount, newSinceSync, err
+			}
+			if rows, err := db.Query(fmt.Sprintf(`SELECT COUNT(*) AS n FROM %s WHERE local_id > ?`, quoteIdent(table)), watermark); err == nil && len(rows) > 0 {
+				newSinceSync += rowInt64(rows[0], "n")
+			} else if err != nil {
+				db.Close()
+				return nil, rawRows, tableCount, newSinceSync, err
+			}
 			last := archiveMinLocalID
 			for {
-				rows, err := db.Query(fmt.Sprintf(`SELECT local_id, server_id, create_time FROM %s WHERE local_id > ? ORDER BY local_id ASC LIMIT 5000`, quoteIdent(table)), last)
+				rows, err := db.Query(fmt.Sprintf(`SELECT local_id, server_id, create_time FROM %s WHERE local_id > ? AND local_id <= ? ORDER BY local_id ASC LIMIT 5000`, quoteIdent(table)), last, watermark)
 				if err != nil {
 					db.Close()
-					return nil, rawRows, tableCount, err
+					return nil, rawRows, tableCount, newSinceSync, err
 				}
 				if len(rows) == 0 {
 					break
@@ -938,7 +957,7 @@ func (s *server) archiveSourceIdentities() (map[string]struct{}, int64, int, err
 		}
 		db.Close()
 	}
-	return ids, rawRows, tableCount, nil
+	return ids, rawRows, tableCount, newSinceSync, nil
 }
 
 func (s *server) archiveMediaItems(talker string, row wcdb.Row) []archiveMediaItem {
