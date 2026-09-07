@@ -30,7 +30,7 @@ import (
 	"github.com/r266-tech/wechat-cli/internal/wxparse"
 )
 
-const archiveSchemaVersion = 1
+const archiveSchemaVersion = 2
 const archiveMinLocalID int64 = -1 << 63
 
 type archiveTalkerMeta struct {
@@ -158,6 +158,7 @@ func (s *server) archiveSync(a map[string]any) (any, error) {
 	}
 
 	stats := archiveSyncStats{StartedAt: time.Now()}
+	fullRescan := getBool(a, "full")
 	talkerMap := s.archiveBuildTalkerMap()
 	shards, err := s.archiveMessageShardNames()
 	if err != nil {
@@ -224,43 +225,47 @@ func (s *server) archiveSync(a map[string]any) (any, error) {
 		if err != nil {
 			return nil, fmt.Errorf("open %s: %w", shardName, err)
 		}
-		if err := db.Exec("BEGIN IMMEDIATE"); err != nil {
+		tables, tableErr := archiveMessageTables(sourceDB)
+		if tableErr != nil {
 			sourceDB.Close()
-			return nil, fmt.Errorf("archive begin %s: %w", shardName, err)
+			return nil, fmt.Errorf("list %s message tables: %w", shardName, tableErr)
 		}
-		committed := false
-		func() {
-			defer sourceDB.Close()
-			tables, tableErr := archiveMessageTables(sourceDB)
-			if tableErr != nil {
-				err = fmt.Errorf("list %s message tables: %w", shardName, tableErr)
-				return
+		n2i, _ := loadName2Id(sourceDB)
+		for _, tableName := range tables {
+			stats.SourceTables++
+			meta, known := talkerMap[strings.ToLower(tableName)]
+			if !known {
+				meta.Username = "hash:" + strings.TrimPrefix(strings.TrimPrefix(tableName, "Msg_"), "msg_")
+				stats.UnresolvedTables++
 			}
-			n2i, _ := loadName2Id(sourceDB)
-			for _, tableName := range tables {
-				stats.SourceTables++
-				meta, known := talkerMap[strings.ToLower(tableName)]
-				if !known {
-					meta.Username = "hash:" + strings.TrimPrefix(strings.TrimPrefix(tableName, "Msg_"), "msg_")
-					stats.UnresolvedTables++
-				}
-				if tableErr = s.archiveSyncTable(sourceDB, db, upsertMessage, deleteMedia, insertMedia, shardName, tableName, meta, n2i, batchSize, &stats); tableErr != nil {
-					err = tableErr
-					return
+			startLocalID := archiveMinLocalID
+			if !fullRescan {
+				startLocalID, tableErr = archiveTableWatermark(db, shardName, tableName)
+				if tableErr != nil {
+					sourceDB.Close()
+					return nil, tableErr
 				}
 			}
-			if tableErr = db.Exec("COMMIT"); tableErr != nil {
-				err = fmt.Errorf("archive commit %s: %w", shardName, tableErr)
-				return
+			// 每个 Msg_* 表独立事务：蓝屏/崩溃时最多回滚一个会话表，同时把
+			// 首次百万消息导入时数 GB 的 WAL 峰值压到单表规模。
+			if tableErr = db.Exec("BEGIN IMMEDIATE"); tableErr != nil {
+				sourceDB.Close()
+				return nil, fmt.Errorf("archive begin %s/%s: %w", shardName, tableName, tableErr)
 			}
-			committed = true
-		}()
-		if !committed {
-			_ = db.Exec("ROLLBACK")
+			lastLocalID, syncErr := s.archiveSyncTable(sourceDB, db, upsertMessage, deleteMedia, insertMedia, shardName, tableName, meta, n2i, batchSize, startLocalID, &stats)
+			if syncErr == nil {
+				syncErr = archiveSetTableWatermark(db, shardName, tableName, lastLocalID)
+			}
+			if syncErr == nil {
+				syncErr = db.Exec("COMMIT")
+			}
+			if syncErr != nil {
+				_ = db.Exec("ROLLBACK")
+				sourceDB.Close()
+				return nil, syncErr
+			}
 		}
-		if err != nil {
-			return nil, err
-		}
+		sourceDB.Close()
 	}
 
 	stats.FinishedAt = time.Now()
@@ -286,6 +291,7 @@ func (s *server) archiveSync(a map[string]any) (any, error) {
 		"source_tables":       stats.SourceTables,
 		"source_rows":         stats.SourceRows,
 		"upserts":             stats.Upserts,
+		"full_rescan":         fullRescan,
 		"unresolved_tables":   stats.UnresolvedTables,
 		"media_local_ready":   stats.MediaLocalReady,
 		"media_remote_pending": stats.MediaRemotePending,
@@ -294,17 +300,17 @@ func (s *server) archiveSync(a map[string]any) (any, error) {
 	return status, nil
 }
 
-func (s *server) archiveSyncTable(sourceDB, archiveDB *wcdb.DB, upsertMessage, deleteMedia, insertMedia *wcdb.Stmt, shardName, tableName string, meta archiveTalkerMeta, n2i map[int64]string, batchSize int, stats *archiveSyncStats) error {
+func (s *server) archiveSyncTable(sourceDB, archiveDB *wcdb.DB, upsertMessage, deleteMedia, insertMedia *wcdb.Stmt, shardName, tableName string, meta archiveTalkerMeta, n2i map[int64]string, batchSize int, startLocalID int64, stats *archiveSyncStats) (int64, error) {
 	selectSQL, err := archiveMessageSelectSQL(sourceDB, tableName)
 	if err != nil {
-		return fmt.Errorf("%s/%s schema: %w", shardName, tableName, err)
+		return startLocalID, fmt.Errorf("%s/%s schema: %w", shardName, tableName, err)
 	}
-	lastLocalID := archiveMinLocalID
+	lastLocalID := startLocalID
 	selfWxid := s.selfWxid()
 	for {
 		rows, err := sourceDB.Query(selectSQL, lastLocalID, batchSize)
 		if err != nil {
-			return fmt.Errorf("%s/%s read after local_id=%d: %w", shardName, tableName, lastLocalID, err)
+			return lastLocalID, fmt.Errorf("%s/%s read after local_id=%d: %w", shardName, tableName, lastLocalID, err)
 		}
 		if len(rows) == 0 {
 			break
@@ -332,14 +338,14 @@ func (s *server) archiveSyncTable(sourceDB, archiveDB *wcdb.DB, upsertMessage, d
 		for _, row := range rows {
 			localID := rowInt64(row, "local_id")
 			if localID <= lastLocalID {
-				return fmt.Errorf("%s/%s local_id did not advance: previous=%d current=%d", shardName, tableName, lastLocalID, localID)
+				return lastLocalID, fmt.Errorf("%s/%s local_id did not advance: previous=%d current=%d", shardName, tableName, lastLocalID, localID)
 			}
 			lastLocalID = localID
 			archiveID := archiveMessageIdentity(tableName, row)
 			canonical := agentMessage(row)
 			canonicalJSON, marshalErr := json.Marshal(canonical)
 			if marshalErr != nil {
-				return fmt.Errorf("marshal canonical %s: %w", archiveID, marshalErr)
+				return lastLocalID, fmt.Errorf("marshal canonical %s: %w", archiveID, marshalErr)
 			}
 			parsed := mapAny(row["message_content_parsed"])
 			parseError := stringMapValue(parsed, "parse_error")
@@ -357,7 +363,7 @@ func (s *server) archiveSyncTable(sourceDB, archiveDB *wcdb.DB, upsertMessage, d
 				stringMapValue(canonical, "text"), string(canonicalJSON), rowString(row, "message_content"), packed, rowString(row, "source"),
 				parseError, appVersion, now,
 			); err != nil {
-				return fmt.Errorf("upsert %s: %w", archiveID, err)
+				return lastLocalID, fmt.Errorf("upsert %s: %w", archiveID, err)
 			}
 			stats.SourceRows++
 			stats.Upserts++
@@ -365,7 +371,7 @@ func (s *server) archiveSyncTable(sourceDB, archiveDB *wcdb.DB, upsertMessage, d
 			media := s.archiveMediaItems(meta.Username, row)
 			if len(media) > 0 {
 				if err := deleteMedia.Exec(archiveID); err != nil {
-					return fmt.Errorf("clear media %s: %w", archiveID, err)
+					return lastLocalID, fmt.Errorf("clear media %s: %w", archiveID, err)
 				}
 				for _, item := range media {
 					if item.Status == "local_ready" {
@@ -377,7 +383,7 @@ func (s *server) archiveSyncTable(sourceDB, archiveDB *wcdb.DB, upsertMessage, d
 						archiveID, item.ItemKey, item.Family, item.Status, item.Name, item.Size, item.MD5,
 						item.LocalPath, item.CDNURL, item.CDNKey, item.SourceKind, now,
 					); err != nil {
-						return fmt.Errorf("insert media %s/%s: %w", archiveID, item.ItemKey, err)
+						return lastLocalID, fmt.Errorf("insert media %s/%s: %w", archiveID, item.ItemKey, err)
 					}
 				}
 			}
@@ -386,7 +392,7 @@ func (s *server) archiveSyncTable(sourceDB, archiveDB *wcdb.DB, upsertMessage, d
 			break
 		}
 	}
-	return nil
+	return lastLocalID, nil
 }
 
 func (s *server) archiveStatus(a map[string]any) (any, error) {
@@ -649,6 +655,13 @@ CREATE TABLE IF NOT EXISTS sync_runs(
   media_remote_pending INTEGER NOT NULL,
   ok INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS table_state(
+  source_shard TEXT NOT NULL,
+  source_table TEXT NOT NULL,
+  last_local_id INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY(source_shard, source_table)
+);
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
   text, talker, sender,
   content='messages', content_rowid='id',
@@ -671,10 +684,37 @@ END;`
 	if err := db.Exec(schema); err != nil {
 		return fmt.Errorf("create archive schema: %w", err)
 	}
+	// schema v1 的首轮全量库没有 table_state。直接从已经归档的消息回填
+	// 每张表的 watermark，使升级到 v2 后下一次 sync 立刻变成真正增量，
+	// 不会因为“升级 schema”再把近百万消息重跑一遍。
+	if err := db.Exec(`INSERT OR IGNORE INTO table_state(source_shard, source_table, last_local_id, updated_at)
+		SELECT source_shard, source_table, MAX(local_id), strftime('%s','now')
+		FROM messages GROUP BY source_shard, source_table`); err != nil {
+		return fmt.Errorf("backfill archive table watermarks: %w", err)
+	}
 	if err := setArchiveMeta(db, "schema_version", strconv.Itoa(archiveSchemaVersion)); err != nil {
 		return err
 	}
 	return nil
+}
+
+func archiveTableWatermark(db *wcdb.DB, shardName, tableName string) (int64, error) {
+	rows, err := db.Query(`SELECT last_local_id FROM table_state WHERE source_shard=? AND source_table=?`, shardName, tableName)
+	if err != nil {
+		return archiveMinLocalID, err
+	}
+	if len(rows) == 0 {
+		return archiveMinLocalID, nil
+	}
+	return rowInt64(rows[0], "last_local_id"), nil
+}
+
+func archiveSetTableWatermark(db *wcdb.DB, shardName, tableName string, lastLocalID int64) error {
+	return db.ExecArgs(`INSERT INTO table_state(source_shard, source_table, last_local_id, updated_at)
+		VALUES(?,?,?,?)
+		ON CONFLICT(source_shard, source_table) DO UPDATE SET
+		last_local_id=excluded.last_local_id, updated_at=excluded.updated_at`,
+		shardName, tableName, lastLocalID, time.Now().Unix())
 }
 
 func (s *server) writeArchiveIdentityMeta(db *wcdb.DB) error {
