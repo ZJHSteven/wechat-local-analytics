@@ -77,6 +77,12 @@ var cliCommandSpecs = []cliCommandSpec{
 	{Command: "cache status", Tool: "cache_status", Usage: appName + " cache status", Examples: []string{appName + " cache status"}},
 	{Command: "cache refresh", Tool: "cache_refresh", Usage: appName + " cache refresh [--force] [--background]", Examples: []string{appName + " cache refresh --force"}},
 	{Command: "cache rebuild", Tool: "cache_rebuild", Usage: appName + " cache rebuild", Examples: []string{appName + " cache rebuild"}},
+	{Command: "archive", Usage: appName + " archive <init|sync|status|verify|search>", Description: "Build and query a canonical, WeChat-version-independent local archive.", Examples: []string{appName + ` archive init --root "D:\\WeChatArchive\\wxid_xxx"`, appName + ` archive sync --root "D:\\WeChatArchive\\wxid_xxx"`}},
+	{Command: "archive init", Usage: appName + " archive init [--root <dir>]", Description: "Create the canonical archive SQLite schema without importing messages.", Examples: []string{appName + ` archive init --root "D:\\WeChatArchive\\wxid_xxx"`}},
+	{Command: "archive sync", Usage: appName + " archive sync [--root <dir>] [--batch-size 1000]", Description: "Idempotently import every Msg_* table from every message shard into the canonical archive.", Examples: []string{appName + ` archive sync --root "D:\\WeChatArchive\\wxid_xxx" --pretty`}},
+	{Command: "archive status", Usage: appName + " archive status [--root <dir>]", Description: "Show archive counts, path, size, and latest sync metadata.", Examples: []string{appName + ` archive status --root "D:\\WeChatArchive\\wxid_xxx" --pretty`}},
+	{Command: "archive verify", Usage: appName + " archive verify [--root <dir>]", Description: "Compare live source message identities with archive identities and report any gap.", Examples: []string{appName + ` archive verify --root "D:\\WeChatArchive\\wxid_xxx" --pretty`}},
+	{Command: "archive search", Usage: appName + " archive search <keyword> [--root <dir>] [--limit 20]", Positional: "keyword", Description: "Search the canonical archive FTS index without reading live WeChat databases.", Examples: []string{appName + ` archive search "挑战杯" --root "D:\\WeChatArchive\\wxid_xxx" --limit 20`}},
 	{Command: "sessions", Tool: "sessions", Usage: appName + " sessions [--limit 20] [--type-filter private,group]", Examples: []string{appName + " sessions --limit 20", appName + ` sessions --type-filter group --keyword "$KEYWORD"`}},
 	{Command: "resolve-chat", Aliases: []string{"resolve_chat"}, Tool: "resolve_chat", Usage: appName + " resolve-chat <chat> [--type-filter private]", Positional: "query", Examples: []string{appName + ` resolve-chat "$CHAT" --type-filter group`}},
 	{Command: "contacts", Tool: "contacts", Usage: appName + " contacts [--keyword 李]", Examples: []string{appName + " contacts --keyword 李 --limit 20"}},
@@ -173,6 +179,9 @@ func maybeRunCLI(args []string) bool {
 		return true
 	case "cache":
 		runCacheCLI(args[1:], opts)
+		return true
+	case "archive":
+		runArchiveCLI(args[1:], opts)
 		return true
 	case "resolve-chat", "resolve_chat":
 		flags := parseKVFlags(args[1:])
