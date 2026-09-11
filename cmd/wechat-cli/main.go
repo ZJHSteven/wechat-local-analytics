@@ -2140,7 +2140,7 @@ func addForwardItemTypedPayload(item map[string]any, kind string, it wxparse.For
 			item["voice"] = voice
 		}
 	case "file":
-		if file := forwardFilePayload(it); len(file) > 0 {
+		if file := forwardFilePayload(it, path, hints); len(file) > 0 {
 			item["files"] = []map[string]any{file}
 		}
 	case "link":
@@ -2196,13 +2196,366 @@ func forwardVoicePayload(it wxparse.ForwardItem) map[string]any {
 	})
 }
 
-func forwardFilePayload(it wxparse.ForwardItem) map[string]any {
-	return compactMap(map[string]any{
+func forwardFilePayload(it wxparse.ForwardItem, path []int, hints []map[string]any) map[string]any {
+	out := compactMap(map[string]any{
 		"name":      firstNonEmpty(it.DataTitle, it.DataDesc),
 		"file_ext":  it.DataFmt,
 		"file_size": it.DataSize,
 		"readable":  false,
 	})
+	if ref := firstForwardFileRefFromHints(path, hints); len(ref) > 0 {
+		if p := rowString(wcdb.Row(ref), "path"); p != "" {
+			out["path"] = p
+			out["readable"] = true
+		}
+		if name := rowString(wcdb.Row(ref), "name"); name != "" {
+			out["name"] = name
+		}
+		if size := rowInt64(wcdb.Row(ref), "file_size"); size > 0 {
+			out["file_size"] = size
+		}
+		if ext := rowString(wcdb.Row(ref), "file_ext"); ext != "" {
+			out["file_ext"] = ext
+		}
+	}
+	return compactMap(out)
+}
+
+func firstForwardFileRefFromHints(path []int, hints []map[string]any) map[string]any {
+	for _, ref := range forwardMediaRefsFromHints(path, hints, "file") {
+		if rowString(wcdb.Row(ref), "path") != "" {
+			return ref
+		}
+	}
+	return nil
+}
+
+type forwardResourceDescriptor struct {
+	path      string
+	dataIndex int
+	family    string
+	fileName  string
+	fileSize  int64
+	md5       string
+}
+
+func collectForwardResourceDescriptors(items []wxparse.ForwardItem) []forwardResourceDescriptor {
+	var out []forwardResourceDescriptor
+	resourceIndex := 0
+	var walk func([]wxparse.ForwardItem, []int)
+	walk = func(items []wxparse.ForwardItem, prefix []int) {
+		for i, it := range items {
+			path := appendForwardPath(prefix, i)
+			family := ""
+			switch it.DataType {
+			case 2:
+				family = "image"
+			case 4:
+				family = "video"
+			case 8:
+				family = "file"
+			}
+			if family != "" {
+				d := forwardResourceDescriptor{
+					path:      forwardPathString(path),
+					dataIndex: resourceIndex,
+					family:    family,
+				}
+				if family == "file" {
+					d.fileName = strings.TrimSpace(firstNonEmpty(it.DataTitle, it.DataDesc))
+					d.fileSize = it.DataSize
+					d.md5 = strings.ToLower(strings.TrimSpace(it.FullMD5))
+				}
+				out = append(out, d)
+				resourceIndex++
+			}
+			if len(it.NestedItems) > 0 {
+				walk(it.NestedItems, path)
+			}
+		}
+	}
+	walk(items, nil)
+	return out
+}
+
+func forwardHintsFromParentResources(resources []map[string]any, descriptors []forwardResourceDescriptor) map[string][]map[string]any {
+	if len(resources) == 0 || len(descriptors) == 0 {
+		return nil
+	}
+	grouped := map[int][]map[string]any{}
+	for _, res := range resources {
+		n, err := strconv.Atoi(strings.TrimSpace(rowString(wcdb.Row(res), "data_index")))
+		if err != nil || n < 0 {
+			continue
+		}
+		grouped[n] = append(grouped[n], res)
+	}
+	out := map[string][]map[string]any{}
+	for _, d := range descriptors {
+		candidates := grouped[d.dataIndex]
+		if len(candidates) == 0 {
+			continue
+		}
+		for _, res := range candidates {
+			if !forwardDescriptorMatchesResource(d, res) {
+				continue
+			}
+			_, _, hints := mediaResourceReadHints([]map[string]any{res})
+			for _, h := range hints {
+				copyHint := copyMap(h)
+				markForwardItemHint(copyHint, d.path, d.family)
+				out[d.path] = append(out[d.path], copyHint)
+			}
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func forwardDescriptorMatchesResource(d forwardResourceDescriptor, res map[string]any) bool {
+	if d.family == "" || rowString(wcdb.Row(res), "resource_family") != d.family {
+		return false
+	}
+	if d.family != "file" {
+		return true
+	}
+	if d.fileName == "" || d.fileSize <= 0 {
+		return false
+	}
+	if size := rowInt64(wcdb.Row(res), "size"); size <= 0 || size != d.fileSize {
+		return false
+	}
+	if md5LikeRe.MatchString(d.md5) {
+		if md5Value := strings.ToLower(strings.TrimSpace(rowString(wcdb.Row(res), "md5"))); md5LikeRe.MatchString(md5Value) && md5Value != d.md5 {
+			return false
+		}
+	}
+	names := append([]string{}, stringSliceAny(res["file_names"])...)
+	if n := strings.TrimSpace(rowString(wcdb.Row(res), "file_name")); n != "" {
+		names = append(names, n)
+	}
+	if len(names) == 0 {
+		return false
+	}
+	for _, n := range names {
+		if strings.TrimSpace(n) == d.fileName {
+			return true
+		}
+	}
+	return false
+}
+
+func mergeForwardHintMaps(dst, src map[string][]map[string]any) map[string][]map[string]any {
+	if len(src) == 0 {
+		return dst
+	}
+	if dst == nil {
+		dst = map[string][]map[string]any{}
+	}
+	for path, hints := range src {
+		dst[path] = append(dst[path], hints...)
+	}
+	return dst
+}
+
+func (s *server) forwardParentResourceReadHints(row wcdb.Row, descriptors []forwardResourceDescriptor) map[string][]map[string]any {
+	if s == nil || len(descriptors) == 0 {
+		return nil
+	}
+	serverID := rowInt64(row, "server_id")
+	localID := rowInt64(row, "local_id")
+	talker := rowString(row, "talker")
+	if serverID == 0 && (localID == 0 || talker == "") {
+		return nil
+	}
+	db, err := s.openDB("message", "message_resource.db")
+	if err != nil {
+		return nil
+	}
+	defer db.Close()
+	var where []string
+	var args []any
+	if serverID != 0 {
+		where = append(where, "i.message_svr_id = ?")
+		args = append(args, serverID)
+	}
+	if localID != 0 && talker != "" {
+		where = append(where, "(i.message_local_id = ? AND c.user_name = ?)")
+		args = append(args, localID, talker)
+	}
+	if len(where) == 0 {
+		return nil
+	}
+	rows, err := db.Query(`SELECT c.user_name AS talker, i.message_local_type, i.message_create_time,
+		i.message_local_id, i.message_svr_id, i.message_origin_source, i.packed_info AS message_packed_info,
+		d.resource_id, d.type AS resource_type_raw, d.size AS resource_size,
+		d.create_time AS resource_create_time, d.access_time AS resource_access_time,
+		d.status AS resource_status, d.data_index AS resource_data_index,
+		d.packed_info AS resource_packed_info
+		FROM MessageResourceInfo i
+		LEFT JOIN ChatName2Id c ON c.rowid = i.chat_id
+		JOIN MessageResourceDetail d ON d.message_id = i.message_id
+		WHERE `+strings.Join(where, " OR ")+`
+		ORDER BY d.resource_id ASC`, args...)
+	if err != nil || len(rows) == 0 {
+		return nil
+	}
+	var resources []map[string]any
+	for _, r := range rows {
+		resources = append(resources, s.mediaResourceFromRow(r, true))
+	}
+	return forwardHintsFromParentResources(resources, descriptors)
+}
+
+type hardlinkFileMatch struct {
+	fileName string
+	dir1     int64
+	dir2     int64
+	recordID string
+	slot     int
+}
+
+func (s *server) hardlinkForwardFilePath(talker, month, md5Value, fileName string, fileSize int64) string {
+	if s == nil || s.cfg == nil || s.cfg.DBRoot == "" || fileSize <= 0 {
+		return ""
+	}
+	fileName = strings.TrimSpace(fileName)
+	if !safeLeafName(fileName) {
+		return ""
+	}
+	md5Value = strings.ToLower(strings.TrimSpace(md5Value))
+	if !md5LikeRe.MatchString(md5Value) {
+		return ""
+	}
+	dbPath := filepath.Join(s.cfg.DBRoot, "db_storage", "message", "hardlink.db")
+	if st, err := os.Stat(dbPath); err != nil || st.IsDir() {
+		return ""
+	}
+	db, err := s.openDB("message", "hardlink.db")
+	if err != nil {
+		return ""
+	}
+	defer db.Close()
+	dirMap := hardlinkDirMap(db)
+	match, ok := hardlinkFileMatchByMD5(db, fileName, md5Value, fileSize)
+	if !ok {
+		return ""
+	}
+	talkerPart := strings.ToLower(talkerHash(talker))
+	if talkerPart == "" {
+		return ""
+	}
+	monthPart := month
+	d1 := dirMap[match.dir1]
+	d2 := dirMap[match.dir2]
+	switch {
+	case strings.EqualFold(d1, talkerPart) && yearMonthRe.MatchString(d2):
+		monthPart = d2
+	case strings.EqualFold(d2, talkerPart) && yearMonthRe.MatchString(d1):
+		monthPart = d1
+	default:
+		return ""
+	}
+	if !yearMonthRe.MatchString(monthPart) || !hardlinkRecordIDRe.MatchString(match.recordID) || match.slot < 0 {
+		return ""
+	}
+	return filepath.Join(s.cfg.DBRoot, "msg", "attach", talkerPart, monthPart, "Rec", match.recordID, "F", strconv.Itoa(match.slot), fileName)
+}
+
+func hardlinkDirMap(db *wcdb.DB) map[int64]string {
+	out := map[int64]string{}
+	if db == nil {
+		return out
+	}
+	rows, err := db.Query(`SELECT rowid AS _rowid, * FROM dir2id`)
+	if err != nil {
+		return out
+	}
+	for _, r := range rows {
+		id := rowInt64(r, "id")
+		if id == 0 {
+			id = rowInt64(r, "_rowid")
+		}
+		if id == 0 {
+			continue
+		}
+		value := ""
+		for _, k := range []string{"value", "name", "path", "dir"} {
+			if v := strings.TrimSpace(rowString(r, k)); v != "" {
+				value = v
+				break
+			}
+		}
+		if value == "" {
+			for _, raw := range r {
+				if s, ok := raw.(string); ok && strings.TrimSpace(s) != "" {
+					value = strings.TrimSpace(s)
+					break
+				}
+			}
+		}
+		if value != "" {
+			out[id] = value
+		}
+	}
+	return out
+}
+
+func hardlinkFileMatchByMD5(db *wcdb.DB, fileName, md5Value string, fileSize int64) (hardlinkFileMatch, bool) {
+	if db == nil || fileSize <= 0 || fileName == "" || !md5LikeRe.MatchString(md5Value) {
+		return hardlinkFileMatch{}, false
+	}
+	rows, err := db.Query(`SELECT md5, dir1, dir2, extra_buffer, file_name, size FROM file_hardlink_info_v4 WHERE lower(md5)=? AND size=?`, md5Value, fileSize)
+	if err != nil {
+		rows, err = db.Query(`SELECT md5, dir1, dir2, extra_buffer, file_name, file_size AS size FROM file_hardlink_info_v4 WHERE lower(md5)=? AND file_size=?`, md5Value, fileSize)
+	}
+	if err != nil {
+		return hardlinkFileMatch{}, false
+	}
+	for _, r := range rows {
+		if !strings.EqualFold(strings.TrimSpace(rowString(r, "file_name")), fileName) {
+			continue
+		}
+		recordID, slot, ok := hardlinkRecordSlot(rowBytes(r, "extra_buffer"))
+		if !ok {
+			continue
+		}
+		return hardlinkFileMatch{
+			fileName: fileName,
+			dir1:     rowInt64(r, "dir1"),
+			dir2:     rowInt64(r, "dir2"),
+			recordID: recordID,
+			slot:     slot,
+		}, true
+	}
+	return hardlinkFileMatch{}, false
+}
+
+func hardlinkRecordSlot(extra []byte) (string, int, bool) {
+	vals := packedStrings(extra)
+	var recordIDs []string
+	slotSet := map[int]bool{}
+	for _, v := range vals {
+		v = strings.TrimSpace(v)
+		if hardlinkRecordIDRe.MatchString(v) {
+			recordIDs = append(recordIDs, strings.ToLower(v))
+			continue
+		}
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 && n <= 4096 {
+			slotSet[n] = true
+		}
+	}
+	recordIDs = uniqueStrings(recordIDs)
+	if len(recordIDs) != 1 || len(slotSet) != 1 {
+		return "", 0, false
+	}
+	slot := 0
+	for n := range slotSet {
+		slot = n
+	}
+	return recordIDs[0], slot, true
 }
 
 func forwardLinkPayload(it wxparse.ForwardItem) map[string]any {
@@ -3816,7 +4169,7 @@ func (s *server) mediaResourceFromRow(r wcdb.Row, includeLocalPaths bool) map[st
 		res["file_name"] = fileNames[0]
 	}
 	if includeLocalPaths {
-		paths := s.localMediaPaths(rowString(r, "talker"), rowInt64(r, "message_create_time"), family, md5Value, fileNames)
+		paths := s.localMediaPaths(rowString(r, "talker"), rowInt64(r, "message_create_time"), family, md5Value, fileNames, rowInt64(r, "resource_size"))
 		res["local_paths"] = paths
 		s.attachLocalPathAgentFields(res, family, paths)
 	}
@@ -5312,7 +5665,7 @@ func forwardXMLReadHints(s *server, row wcdb.Row, p map[string]any) []map[string
 	if s == nil || len(items) == 0 {
 		return nil
 	}
-	resourceHints := s.forwardResourceReadHints(items)
+	resourceHints := s.forwardResourceReadHints(row, items)
 	var hints []map[string]any
 	var walk func([]wxparse.ForwardItem, []int)
 	walk = func(items []wxparse.ForwardItem, prefix []int) {
@@ -5371,12 +5724,13 @@ type forwardResourceLookup struct {
 	serverID int64
 }
 
-func (s *server) forwardResourceReadHints(items []wxparse.ForwardItem) map[string][]map[string]any {
+func (s *server) forwardResourceReadHints(row wcdb.Row, items []wxparse.ForwardItem) map[string][]map[string]any {
 	if s == nil || len(items) == 0 {
 		return nil
 	}
+	descriptors := collectForwardResourceDescriptors(items)
 	lookups := collectForwardResourceLookups(items)
-	if len(lookups) == 0 {
+	if len(lookups) == 0 && len(descriptors) == 0 {
 		return nil
 	}
 	byServerID := map[int64][]string{}
@@ -5391,15 +5745,16 @@ func (s *server) forwardResourceReadHints(items []wxparse.ForwardItem) map[strin
 		byServerID[lookup.serverID] = appendUniqueStrings(byServerID[lookup.serverID], lookup.path)
 	}
 	serverIDs = uniqueInt64s(serverIDs)
+	var out map[string][]map[string]any
+	out = mergeForwardHintMaps(out, s.forwardParentResourceReadHints(row, descriptors))
 	if len(serverIDs) == 0 {
-		return nil
+		return out
 	}
 	db, err := s.openDB("message", "message_resource.db")
 	if err != nil {
-		return nil
+		return out
 	}
 	defer db.Close()
-	out := map[string][]map[string]any{}
 	for start := 0; start < len(serverIDs); start += 200 {
 		end := start + 200
 		if end > len(serverIDs) {
@@ -5432,9 +5787,7 @@ func (s *server) forwardResourceReadHints(items []wxparse.ForwardItem) map[strin
 			res["source_server_id"] = rowInt64(r, "message_svr_id")
 			resources = append(resources, res)
 		}
-		for pathKey, hints := range forwardHintsFromResources(resources, byServerID) {
-			out[pathKey] = append(out[pathKey], hints...)
-		}
+		out = mergeForwardHintMaps(out, forwardHintsFromResources(resources, byServerID))
 	}
 	if len(out) == 0 {
 		return nil
@@ -5686,7 +6039,7 @@ func appendUniqueAny(vals []any, extra any) []any {
 	return append(vals, extra)
 }
 
-func (s *server) localMediaPaths(talker string, createTime int64, family, md5Value string, fileNames []string) []string {
+func (s *server) localMediaPaths(talker string, createTime int64, family, md5Value string, fileNames []string, fileSize int64) []string {
 	if s == nil || s.cfg == nil || s.cfg.DBRoot == "" || createTime == 0 {
 		return nil
 	}
@@ -5715,6 +6068,16 @@ func (s *server) localMediaPaths(talker string, createTime int64, family, md5Val
 		for _, name := range fileNames {
 			if safeLeafName(name) {
 				candidates = append(candidates, filepath.Join(base, name))
+			}
+		}
+		if len(fileNames) > 0 && fileSize > 0 {
+			for _, name := range fileNames {
+				if !safeLeafName(name) {
+					continue
+				}
+				if attachPath := s.hardlinkForwardFilePath(talker, month, md5Value, name, fileSize); attachPath != "" {
+					candidates = append(candidates, attachPath)
+				}
 			}
 		}
 	}
@@ -6023,7 +6386,11 @@ func rowBytes(r wcdb.Row, key string) []byte {
 	return nil
 }
 
-var md5LikeRe = regexp.MustCompile(`^[0-9a-fA-F]{32}$`)
+var (
+	md5LikeRe          = regexp.MustCompile(`^[0-9a-fA-F]{32}$`)
+	hardlinkRecordIDRe = regexp.MustCompile(`^[0-9a-fA-F]{16}$`)
+	yearMonthRe        = regexp.MustCompile(`^\d{4}-\d{2}$`)
+)
 
 func firstMD5(vals []string) string {
 	for _, v := range vals {

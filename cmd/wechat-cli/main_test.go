@@ -2072,7 +2072,7 @@ func TestForwardResourceReadHintsResolveImageBySourceServerID(t *testing.T) {
 		"resource_family":   "image",
 		"resource_id":       int64(269107),
 		"resource_type_raw": int64(65537),
-		"local_paths":       srv.localMediaPaths(sourceTalker, ts, "image", resourceMD5, nil),
+		"local_paths":       srv.localMediaPaths(sourceTalker, ts, "image", resourceMD5, nil, 0),
 	}}
 	contentSum := md5.Sum(imageBytes)
 	srv.attachReadableImageMatchesByContentMD5(resources[0], ts, hex.EncodeToString(contentSum[:]))
@@ -2171,6 +2171,144 @@ func TestForwardImageRefsPreferOriginalOverThumbnail(t *testing.T) {
 	refs := forwardMediaRefsFromHints([]int{0}, hints, "image")
 	if len(refs) != 1 || refs[0]["path"] != "/tmp/forward.png" {
 		t.Fatalf("forward refs = %#v, want original/high path only", refs)
+	}
+}
+
+func TestForwardFilePayloadBackfillsReadablePathFromHints(t *testing.T) {
+	path := `/tmp/msg/attach/hash/2026-09/Rec/b5f40cc303141da2/F/6/result4_rechecked (1).xlsx`
+	it := wxparse.ForwardItem{
+		DataType:  8,
+		DataTitle: "result4_rechecked (1).xlsx",
+		DataFmt:   "xlsx",
+		DataSize:  316805,
+	}
+	hints := []map[string]any{{
+		"source":                      "message_forward_item",
+		"forward_path":                "0",
+		"resource_family":             "file",
+		"direct_readable_local_paths": []string{path},
+		"local_path_details": []map[string]any{{
+			"path":      path,
+			"file_size": int64(316805),
+		}},
+	}}
+	file := forwardFilePayload(it, []int{0}, hints)
+	if file["path"] != path || file["readable"] != true || file["name"] != it.DataTitle {
+		t.Fatalf("forward file payload = %#v", file)
+	}
+	item := map[string]any{"kind": "file", "files": []map[string]any{file}}
+	attachForwardItemMissingMediaWarnings(item, "file")
+	if warnings := stringSliceAny(item["warnings"]); len(warnings) != 0 {
+		t.Fatalf("warnings = %#v, want resolved forward file warning cleared", warnings)
+	}
+}
+
+func TestForwardHintsFromParentResourcesUsesDataIndexMapping(t *testing.T) {
+	pathA := `/tmp/msg/attach/hash/2026-09/Rec/b5f40cc303141da2/F/3/A题第四问_建模思路_代码_结果_最终整理包.zip`
+	pathB := `/tmp/msg/attach/hash/2026-09/Rec/b5f40cc303141da2/F/6/result4_rechecked (1).xlsx`
+	resources := []map[string]any{
+		{
+			"data_index":                  "3",
+			"resource_family":             "file",
+			"size":                        int64(832705),
+			"md5":                         "d1effd1edf4ba56c7d024ef88c2aa5a9",
+			"file_name":                   "A题第四问_建模思路_代码_结果_最终整理包.zip",
+			"file_names":                  []string{"A题第四问_建模思路_代码_结果_最终整理包.zip"},
+			"local_paths":                 []string{pathA},
+			"direct_readable_local_paths": []string{pathA},
+			"local_path_details":          []map[string]any{{"path": pathA, "file_size": int64(832705)}},
+		},
+		{
+			"data_index":                  "6",
+			"resource_family":             "file",
+			"size":                        int64(316805),
+			"md5":                         "d4731b4d7fad45829caa067526ebff69",
+			"file_name":                   "result4_rechecked (1).xlsx",
+			"file_names":                  []string{"result4_rechecked (1).xlsx"},
+			"local_paths":                 []string{pathB},
+			"direct_readable_local_paths": []string{pathB},
+			"local_path_details":          []map[string]any{{"path": pathB, "file_size": int64(316805)}},
+		},
+	}
+	descriptors := []forwardResourceDescriptor{
+		{
+			path:      "0.3",
+			dataIndex: 3,
+			family:    "file",
+			fileName:  "A题第四问_建模思路_代码_结果_最终整理包.zip",
+			fileSize:  832705,
+			md5:       "d1effd1edf4ba56c7d024ef88c2aa5a9",
+		},
+		{
+			path:      "0.6",
+			dataIndex: 6,
+			family:    "file",
+			fileName:  "result4_rechecked (1).xlsx",
+			fileSize:  316805,
+			md5:       "d4731b4d7fad45829caa067526ebff69",
+		},
+	}
+	hints := forwardHintsFromParentResources(resources, descriptors)
+	if len(hints["0.3"]) != 1 || len(hints["0.6"]) != 1 {
+		t.Fatalf("hints = %#v", hints)
+	}
+	if got := stringSliceAny(hints["0.3"][0]["direct_readable_local_paths"]); len(got) != 1 || got[0] != pathA {
+		t.Fatalf("0.3 paths = %#v", got)
+	}
+	if got := stringSliceAny(hints["0.6"][0]["direct_readable_local_paths"]); len(got) != 1 || got[0] != pathB {
+		t.Fatalf("0.6 paths = %#v", got)
+	}
+}
+
+func TestForwardHintsFromParentResourcesRejectsFileMismatchesAndNonUnique(t *testing.T) {
+	path := "/tmp/msg/attach/hash/2026-09/Rec/b5f40cc303141da2/F/3/same-name.zip"
+	resources := []map[string]any{{
+		"data_index":                  "3",
+		"resource_family":             "file",
+		"size":                        int64(832705),
+		"md5":                         "d1effd1edf4ba56c7d024ef88c2aa5a9",
+		"file_name":                   "same-name.zip",
+		"file_names":                  []string{"same-name.zip"},
+		"local_paths":                 []string{path},
+		"direct_readable_local_paths": []string{path},
+		"local_path_details":          []map[string]any{{"path": path, "file_size": int64(832705)}},
+	}}
+	mismatch := []forwardResourceDescriptor{{
+		path:      "0.3",
+		dataIndex: 3,
+		family:    "file",
+		fileName:  "same-name.zip",
+		fileSize:  316805,
+		md5:       "d4731b4d7fad45829caa067526ebff69",
+	}}
+	if got := forwardHintsFromParentResources(resources, mismatch); len(got) != 0 {
+		t.Fatalf("mismatch should stay unresolved, got %#v", got)
+	}
+	notUnique := []forwardResourceDescriptor{{
+		path:      "0.3",
+		dataIndex: 3,
+		family:    "file",
+		fileName:  "same-name.zip",
+		fileSize:  0,
+		md5:       "",
+	}}
+	if got := forwardHintsFromParentResources(resources, notUnique); len(got) != 0 {
+		t.Fatalf("missing required size should stay unresolved, got %#v", got)
+	}
+}
+
+func TestHardlinkRecordSlotParsesStableRecordAndSlot(t *testing.T) {
+	extra := append([]byte{0x0A, 0x10}, []byte("b5f40cc303141da2")...)
+	extra = append(extra, 0x12, 0x01, '3')
+	recordID, slot, ok := hardlinkRecordSlot(extra)
+	if !ok || recordID != "b5f40cc303141da2" || slot != 3 {
+		t.Fatalf("hardlinkRecordSlot = (%q, %d, %v)", recordID, slot, ok)
+	}
+
+	ambiguous := append([]byte{0x0A, 0x10}, []byte("b5f40cc303141da2")...)
+	ambiguous = append(ambiguous, 0x12, 0x01, '3', 0x1A, 0x01, '6')
+	if _, _, ok := hardlinkRecordSlot(ambiguous); ok {
+		t.Fatalf("hardlinkRecordSlot should reject ambiguous slots")
 	}
 }
 
@@ -2799,7 +2937,7 @@ func TestLocalMediaPathsUsesExactWeChatLayout(t *testing.T) {
 	if err := os.WriteFile(img, []byte("img"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	paths := srv.localMediaPaths(talker, ts, "image", md5, nil)
+	paths := srv.localMediaPaths(talker, ts, "image", md5, nil, 0)
 	if len(paths) != 1 || paths[0] != img {
 		t.Fatalf("image localMediaPaths = %#v, want %q", paths, img)
 	}
@@ -2812,7 +2950,7 @@ func TestLocalMediaPathsUsesExactWeChatLayout(t *testing.T) {
 	if err := os.WriteFile(filePath, []byte("file"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	paths = srv.localMediaPaths(talker, ts, "file", "", []string{fileName, "../bad.pdf"})
+	paths = srv.localMediaPaths(talker, ts, "file", "", []string{fileName, "../bad.pdf"}, 0)
 	if len(paths) != 1 || paths[0] != filePath {
 		t.Fatalf("file localMediaPaths = %#v, want %q", paths, filePath)
 	}
@@ -2842,7 +2980,7 @@ func TestLocalMediaPathsPrefersDirectReadableTempImageByMD5(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	paths := srv.localMediaPaths(talker, ts, "image", md5Value, nil)
+	paths := srv.localMediaPaths(talker, ts, "image", md5Value, nil, 0)
 	if len(paths) != 2 || paths[0] != direct || paths[1] != imgDAT {
 		t.Fatalf("image localMediaPaths = %#v, want direct PNG then .dat", paths)
 	}
