@@ -970,7 +970,7 @@ func (s *server) archiveMediaItems(talker string, row wcdb.Row) []archiveMediaIt
 		var msg xmlMsgAppmsg
 		if xml.Unmarshal([]byte(wxparse.StripMsgPrefix(raw)), &msg) == nil {
 			name := strings.TrimSpace(msg.AppMsg.Title)
-			paths := s.localMediaPaths(talker, createTime, "file", "", []string{name})
+			paths := s.localMediaPaths(talker, createTime, "file", "", []string{name}, msg.AppMsg.AppAttach.TotalLen)
 			item := archiveMediaItem{
 				ItemKey:    "direct:file",
 				Family:     "file",
@@ -1009,7 +1009,7 @@ func (s *server) archiveForwardFileItems(talker string, fallbackTime int64, item
 			if createTime == 0 {
 				createTime = fallbackTime
 			}
-			paths := s.localMediaPaths(talker, createTime, "file", "", []string{item.DataTitle})
+			paths := s.localMediaPaths(talker, createTime, "file", strings.ToLower(strings.TrimSpace(item.FullMD5)), []string{item.DataTitle}, item.DataSize)
 			media := archiveMediaItem{
 				ItemKey:    itemKey,
 				Family:     "file",
