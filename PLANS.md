@@ -1,5 +1,15 @@
 # 微信 Chat Exporter 第一阶段 ExecPlan
 
+## 2026-09-12：合并转发手动下载附件自动发现审计
+
+目标：解释并验证“用户已在微信 GUI 中手动下载合并转发附件，但 `wechat-cli` 仍返回 `forward_file_not_resolved`”的根因，并判断是否属于媒体发现/回填设计缺口。
+
+1. 定位 `forward_file_not_resolved`、合并转发 file item、`media_resources` 与本地文件解析代码。
+2. 对照当前真机样本：Q4 ZIP / `result4_rechecked.xlsx` 已落在 `msg/attach/.../Rec/...`，但普通文件解析主要命中 `msg/file/...`。
+3. 检查 `hardlink.db`、消息 XML / packed 字段是否存在足以把 forward item 映射到 `msg/attach` 实体的稳定键（文件名、大小、md5、attach id、hardlink 记录等）。
+4. 判断合理修复层级：优先做确定性本地实体回填；仅在无法唯一匹配时保持 unresolved，禁止按同名文件盲猜。
+5. 用真实 Q4 合并转发样本和自动化单测验证；若实现修改，同步更新 `PROGRESS.md`。
+
 ## 目标
 - 以当前 `wechat-cli` 幸存源码为主底座，做成可长期维护的微信 4.x 本地历史读取/搜索/导出 CLI。
 - 当前阶段只解决“稳定读取和导出”，不把实时发送、家庭服务器托管、Web UI 混入主线。
