@@ -21,6 +21,7 @@
 - `archive verify` 已改为按上次同步 watermark 做活数据库一致性验证：最新真实验收为 archive 979030 条、FTS 979030 条、watermark 范围内 `source_missing_in_archive=0`、`archive_only_messages=0`；verify 扫描期间新到的 2 条消息只计入 `new_since_sync=2`，不误报归档损坏。
 - Archive 当前只保存消息事实、raw/canonical JSON、FTS 与媒体清单/状态；尚未把全部媒体实体复制到 Archive。现已识别 2677 个 `local_ready` 文件项和 4813 个 `remote_pending` 文件项，后者是后续自动抢救下载的主要队列。
 - 文件 parser 已补保留普通 AppMsg 的 `cdnattachurl`；合并转发中的嵌套 file item 也会递归进入媒体清单，便于后续优先尝试 CDN 元数据下载，失败再走微信 UI 下载 fallback。
+- 2026-09-12 已用真实合并转发样本确认一个本地文件发现缺口：用户在微信 GUI 手动下载后的文件可落在 `msg/attach/<chat-hash>/<YYYY-MM>/Rec/<record-id>/F/<slot>/<name>`，而当前 `localMediaPaths(..., family="file")` 只检查 `msg/file/<YYYY-MM>/<name>`，因此即使文件已实际落盘，forward item 仍可能返回 `forward_file_not_resolved`。真库同时给出了可用于确定性修复的映射：父 forward 消息的 `message_resource.db` 以 `data_index=0..N-1` 对应转发 item 顺序；`hardlink.db:file_hardlink_info_v4` 记录文件名/大小/MD5、`dir1/dir2` 和 `extra_buffer`，其中 `extra_buffer` 可还原 `Rec/<record-id>/F/<slot>`。修复应优先使用这些数据库键，不做全盘同名文件盲猜。
 - 带 Archive 功能的最新 `wechat-cli.exe` 已重新安装到 `D:\App\wechat-cli`；从 `C:\Users\ZJHSteven\bin\wechat-cli.cmd` 全局入口冷启动 `archive status` 验收成功。
 
 ## 本机固定路径
