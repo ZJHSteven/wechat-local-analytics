@@ -11,7 +11,7 @@
 5. Archive 现有 forward-file manifest 复用相同 `Rec/F` resolver，使 `local_ready/remote_pending` 与实时读取结论一致；本批不扩大 Archive 的图片 blob 设计范围。
 6. 自动化覆盖：无扩展名 Rec V4 图片解码、跨 hint 高清择优、Rec/V、Rec/F、forward file readable hint；真机回归覆盖实验上午图片、Transwell 显微镜图、Q4 ZIP/XLSX 文件。
 
-当前状态：实现和三组真机回归均已通过；剩余工作为最终代码审查、提交与正式安装验收。
+当前状态：实现、自动化回归、三组真机样本和正式安装验收均已完成；代码提交为 `2613a19`，全局 `wechat-cli` 已运行该修复构建。
 
 ## 2026-09-12：合并转发手动下载附件自动发现审计
 

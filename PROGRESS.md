@@ -1,6 +1,8 @@
 # 项目状态快照
 
 ## 当前结论（必须最新）
+- 2026-10-09：上述 forward Rec 修复已从提交 `2613a19` 重新构建并正式替换 `D:\App\wechat-cli\wechat-cli.exe`；全局 `wechat-cli` 入口完成再次真机验收：上午实验 forward 11 张图可读、病原小组 local_id=51 的 `media` 返回 17 张最佳图片（15×960×1280 + 2×4032×3024）、数学建模群 local_id=270 的 `media` 返回 7/7 个可读文件。临时旁路 exe 与旧正式版备份已在验收成功后删除。
+- 测试状态：本次新增/相关 `cmd/wechat-cli` forward/media 测试全部通过；一次 `go test ./...` 还存在两个与本改动无关的既有 Windows 环境失败：`TestReadRegressionScriptRequiresExplicitInputs` 依赖 `/bin/bash`，`TestVoiceTranscriptUsesConfiguredLocalASRAndCache` 的测试 ASR 返回 unavailable。其余 internal 包在该次全量测试中通过。
 - 2026-10-09：已在 `fix/forward-rec-media` 完成统一的合并转发本地媒体回填。父 forward 消息的 `packed_info_data` 可提取稳定 record-id；GUI 已下载/点开的媒体可从 `msg/attach/<chat-hash>/<parent-month>/Rec/<record-id>/Img|V|F` 确定性发现。无扩展名 `Rec/Img/<index>` 仍是标准 WeChat V4 图片容器，现直接复用已有 image_key/image_xor_key 解码器。
 - 2026-10-09：图片 source-message 缩略图/普通 attach/temp 可读副本/Rec 大图与已有 `_h` 原图现在统一进入候选池，由现有图片质量评分按缩略图标记、像素面积、文件大小和 variant 排名选择 Agent 可读的最佳版本；不会因为“已有 157×210 可读缩略图”就提前停止。
 - 2026-10-09：`history/timeline` 与专用 `media` 入口已复用同一套 forward parser/resolver；`media --local-id <forward>` 会展开 `forward_chat.items[].images/videos/files`。forward file 也会消费本地 media hint，命中 `Rec/F` 后返回 `readable:true`，并同步供 canonical archive 的 forward-file manifest 判断 `local_ready`。
