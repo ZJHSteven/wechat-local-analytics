@@ -120,9 +120,9 @@ func parseASREnabled(raw string) bool {
 }
 
 type capsWriterHTTPJob struct {
-	OK     bool                    `json:"ok"`
-	ID     string                  `json:"id"`
-	Status string                  `json:"status"`
+	OK     bool                     `json:"ok"`
+	ID     string                   `json:"id"`
+	Status string                   `json:"status"`
 	Result *capsWriterHTTPJobResult `json:"result"`
 	Error  *capsWriterHTTPJobError  `json:"error"`
 }
