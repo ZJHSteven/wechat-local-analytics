@@ -2174,6 +2174,191 @@ func TestForwardImageRefsPreferOriginalOverThumbnail(t *testing.T) {
 	}
 }
 
+func TestForwardImageRefsPreferRecordCacheAcrossHints(t *testing.T) {
+	hints := []map[string]any{
+		{
+			"source":                      "message_forward_item",
+			"forward_path":                "0",
+			"resource_family":             "image",
+			"direct_readable_local_paths": []string{"/tmp/source_t.jpg"},
+			"local_path_details": []map[string]any{{
+				"path":   "/tmp/source_t.jpg",
+				"width":  157,
+				"height": 210,
+			}},
+		},
+		{
+			"source":                      "message_forward_item",
+			"forward_path":                "0",
+			"resource_family":             "image",
+			"record_cache":                true,
+			"direct_readable_local_paths": []string{"/tmp/record-big.jpg"},
+			"local_path_details": []map[string]any{{
+				"path":      "/tmp/record-big.jpg",
+				"width":     960,
+				"height":    1280,
+				"file_size": int64(100000),
+			}},
+		},
+	}
+
+	refs := forwardMediaRefsFromHints([]int{0}, hints, "image")
+	if len(refs) != 1 || refs[0]["path"] != "/tmp/record-big.jpg" {
+		t.Fatalf("forward refs = %#v, want Rec big image only", refs)
+	}
+}
+
+func TestForwardFileRefsUseReadableHint(t *testing.T) {
+	it := wxparse.ForwardItem{DataType: 8, DataTitle: "report.pdf", DataFmt: "pdf", DataSize: 123}
+	hints := []map[string]any{{
+		"source":                      "message_forward_item",
+		"forward_path":                "0",
+		"resource_family":             "file",
+		"direct_readable_local_paths": []string{"C:\\tmp\\record\\report.pdf"},
+	}}
+
+	refs := forwardFileRefs(it, []int{0}, hints)
+	if len(refs) != 1 || refs[0]["path"] != "C:\\tmp\\record\\report.pdf" || refs[0]["readable"] != true {
+		t.Fatalf("forward file refs = %#v, want readable record file", refs)
+	}
+	if refs[0]["name"] != "report.pdf" || refs[0]["file_size"] != int64(123) || refs[0]["file_ext"] != "pdf" {
+		t.Fatalf("forward file metadata = %#v", refs[0])
+	}
+}
+
+func TestForwardRecordImageHintDecodesExtensionlessV4(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := t.TempDir()
+	key := []byte("0123456789abcdef")
+	xorKey := 0
+	srv := &server{cfg: &config.Config{
+		DBRoot:      root,
+		Wxid:        "wxid_test",
+		ImageKey:    string(key),
+		ImageXORKey: &xorKey,
+	}}
+	talker := "filehelper"
+	recordID := "a4a66de1071b0e99"
+	createTime := time.Date(2026, 10, 7, 21, 48, 14, 0, time.Local).Unix()
+	recPath := filepath.Join(root, "msg", "attach", talkerHash(talker), "2026-10", "Rec", recordID, "Img", "0")
+	if err := os.MkdirAll(filepath.Dir(recPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(recPath, testWechatV4ImageDAT(t, key, tinyPNG()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// packedStrings() recursively extracts this printable length-delimited
+	// field, matching the parent forward packed_info_data used by WeChat.
+	packed := append([]byte{0x0a, 0x10}, []byte(recordID)...)
+	row := wcdb.Row{
+		"talker":           talker,
+		"create_time":      createTime,
+		"packed_info_data": packed,
+	}
+	it := wxparse.ForwardItem{DataType: 2, DataSize: int64(len(tinyPNG()))}
+	h := srv.forwardRecordMediaReadHint(row, it, []int{0}, "image")
+	if h == nil {
+		t.Fatal("forwardRecordMediaReadHint returned nil")
+	}
+	if h["record_cache"] != true || h["record_id"] != recordID || h["forward_path"] != "0" {
+		t.Fatalf("record hint metadata = %#v", h)
+	}
+	decoded := stringSliceAny(h["decoded_local_paths"])
+	if len(decoded) != 1 {
+		t.Fatalf("decoded_local_paths = %#v, want one decoded image", h["decoded_local_paths"])
+	}
+	if got, err := os.ReadFile(decoded[0]); err != nil || !bytes.Equal(got, tinyPNG()) {
+		t.Fatalf("decoded record image mismatch: err=%v len=%d", err, len(got))
+	}
+	details := mapSliceAny(h["local_path_details"])
+	if len(details) != 1 || details[0]["decode_status"] != "decoded" || details[0]["width"] != 1 || details[0]["height"] != 1 {
+		t.Fatalf("record image details = %#v", details)
+	}
+}
+
+func TestForwardRecordIDPrefersExistingRecDirectory(t *testing.T) {
+	root := t.TempDir()
+	talker := "room@chatroom"
+	createTime := time.Date(2026, 10, 9, 13, 0, 0, 0, time.Local).Unix()
+	missing := "1111111111111111"
+	want := "2222222222222222"
+	packed := append([]byte{0x0a, 0x10}, []byte(missing)...)
+	packed = append(packed, 0x12, 0x10)
+	packed = append(packed, []byte(want)...)
+	recDir := filepath.Join(root, "msg", "attach", talkerHash(talker), "2026-10", "Rec", want)
+	if err := os.MkdirAll(recDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	srv := &server{cfg: &config.Config{DBRoot: root}}
+	row := wcdb.Row{"talker": talker, "create_time": createTime, "packed_info_data": packed}
+	if got := srv.forwardRecordIDFromRow(row); got != want {
+		t.Fatalf("forwardRecordIDFromRow = %q, want existing Rec id %q", got, want)
+	}
+}
+
+func TestForwardRecordVideoPathUsesRecordCache(t *testing.T) {
+	root := t.TempDir()
+	srv := &server{cfg: &config.Config{DBRoot: root}}
+	talker := "room@chatroom"
+	recordID := "1234567890abcdef"
+	createTime := time.Date(2026, 10, 9, 12, 0, 0, 0, time.Local).Unix()
+	videoPath := filepath.Join(root, "msg", "attach", talkerHash(talker), "2026-10", "Rec", recordID, "V", "3.mp4")
+	if err := os.MkdirAll(filepath.Dir(videoPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(videoPath, []byte{0, 0, 0, 16, 'f', 't', 'y', 'p', 'm', 'p', '4', '2'}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	row := wcdb.Row{
+		"talker":           talker,
+		"create_time":      createTime,
+		"packed_info_data": append([]byte{0x0a, 0x10}, []byte(recordID)...),
+	}
+	paths := srv.forwardRecordMediaPaths(row, wxparse.ForwardItem{DataType: 4}, []int{3}, "video")
+	if len(paths) != 1 || paths[0] != videoPath {
+		t.Fatalf("record video paths = %#v, want [%q]", paths, videoPath)
+	}
+}
+
+func TestForwardRecordFilePathUsesRecordCache(t *testing.T) {
+	root := t.TempDir()
+	srv := &server{cfg: &config.Config{DBRoot: root}}
+	talker := "room@chatroom"
+	recordID := "abcdef0123456789"
+	createTime := time.Date(2026, 9, 12, 0, 29, 44, 0, time.Local).Unix()
+	filePath := filepath.Join(root, "msg", "attach", talkerHash(talker), "2026-09", "Rec", recordID, "F", "6", "result4_rechecked (1).xlsx")
+	if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	payload := []byte("xlsx-test-payload")
+	if err := os.WriteFile(filePath, payload, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	row := wcdb.Row{
+		"talker":           talker,
+		"create_time":      createTime,
+		"packed_info_data": append([]byte{0x0a, 0x10}, []byte(recordID)...),
+	}
+	it := wxparse.ForwardItem{
+		DataType:  8,
+		DataTitle: "result4_rechecked (1).xlsx",
+		DataFmt:   "xlsx",
+		DataSize:  int64(len(payload)),
+	}
+	paths := srv.forwardRecordMediaPaths(row, it, []int{6}, "file")
+	if len(paths) != 1 || paths[0] != filePath {
+		t.Fatalf("record file paths = %#v, want [%q]", paths, filePath)
+	}
+
+	archiveItems := make([]wxparse.ForwardItem, 7)
+	archiveItems[6] = it
+	archived := srv.archiveForwardFileItems(talker, createTime, row, archiveItems, "forward", nil)
+	if len(archived) != 1 || archived[0].Status != "local_ready" || archived[0].LocalPath != filePath {
+		t.Fatalf("archive forward file = %#v, want local_ready at %q", archived, filePath)
+	}
+}
+
 func TestAgentForwardChatSourceReuseDoesNotDuplicateNestedForward(t *testing.T) {
 	sourceForward := wcdb.Row{
 		"talker":        "room@chatroom",

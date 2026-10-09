@@ -1,6 +1,10 @@
 # 项目状态快照
 
 ## 当前结论（必须最新）
+- 2026-10-09：已在 `fix/forward-rec-media` 完成统一的合并转发本地媒体回填。父 forward 消息的 `packed_info_data` 可提取稳定 record-id；GUI 已下载/点开的媒体可从 `msg/attach/<chat-hash>/<parent-month>/Rec/<record-id>/Img|V|F` 确定性发现。无扩展名 `Rec/Img/<index>` 仍是标准 WeChat V4 图片容器，现直接复用已有 image_key/image_xor_key 解码器。
+- 2026-10-09：图片 source-message 缩略图/普通 attach/temp 可读副本/Rec 大图与已有 `_h` 原图现在统一进入候选池，由现有图片质量评分按缩略图标记、像素面积、文件大小和 variant 排名选择 Agent 可读的最佳版本；不会因为“已有 157×210 可读缩略图”就提前停止。
+- 2026-10-09：`history/timeline` 与专用 `media` 入口已复用同一套 forward parser/resolver；`media --local-id <forward>` 会展开 `forward_chat.items[].images/videos/files`。forward file 也会消费本地 media hint，命中 `Rec/F` 后返回 `readable:true`，并同步供 canonical archive 的 forward-file manifest 判断 `local_ready`。
+- 2026-10-09 真机回归：文件传输助手 10-07 21:48 的上午实验转发自动选出 1280×1707 等 Rec 大图，并保留两张已有 4032×3024 `_h`；“病原小组” 10-04 20:51 / local_id=51 的 15 张 Transwell 图全部自动返回 960×1280 Rec 大图，另两张已有 `_h` 继续使用 4032×3024；数学建模群 09-12 00:29 / local_id=270 的 7 个 ZIP/XLSX 全部从 `Rec/F/0..6` 恢复为 `readable:true`，包括 `result4_rechecked (1).xlsx` 精确命中 `F/6`。此前记录的 `forward_file_not_resolved` 缺口已被该统一 resolver 实际解决。
 - 现状：`wechat-cli` 1.6.20 已在 Windows 微信 4.1.9.57 + Sandboxie 环境完成 DB key、会话解析、timeline、search、JSONL/Markdown 导出的真实数据验证。
 - 已完成：找到 r266 幸存源码；Windows 编译成功；构建 SQLCipher 兼容 `libWCDB.dll`；首次 `cache refresh --force` 成功获取 24 个 DB key；仝立炎已知窗口返回精确 73 条。
 - 正在做：基于用户刚从手机回灌后的更完整历史，重新建立全库回归基线；调查微信原生语音转写缓存。回灌后 cache 已从 24 个 DB key / 855 会话增长到 26 个 DB key / 1238 会话。

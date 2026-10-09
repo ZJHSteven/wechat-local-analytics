@@ -2140,7 +2140,9 @@ func addForwardItemTypedPayload(item map[string]any, kind string, it wxparse.For
 			item["voice"] = voice
 		}
 	case "file":
-		if file := forwardFilePayload(it); len(file) > 0 {
+		if files := forwardFileRefs(it, path, hints); len(files) > 0 {
+			item["files"] = files
+		} else if file := forwardFilePayload(it); len(file) > 0 {
 			item["files"] = []map[string]any{file}
 		}
 	case "link":
@@ -2182,6 +2184,27 @@ func forwardVideoRefs(it wxparse.ForwardItem, path []int, hints []map[string]any
 		return refs
 	}
 	return nil
+}
+
+func forwardFileRefs(it wxparse.ForwardItem, path []int, hints []map[string]any) []map[string]any {
+	refs := forwardMediaRefsFromHints(path, hints, "file")
+	if len(refs) == 0 {
+		return nil
+	}
+	name := firstNonEmpty(it.DataTitle, it.DataDesc)
+	for _, ref := range refs {
+		if name != "" {
+			ref["name"] = name
+		}
+		if it.DataSize > 0 {
+			ref["file_size"] = it.DataSize
+		}
+		if it.DataFmt != "" {
+			ref["file_ext"] = it.DataFmt
+		}
+		ref["readable"] = true
+	}
+	return dedupeAgentFileRefs(refs)
 }
 
 func forwardVoicePayload(it wxparse.ForwardItem) map[string]any {
@@ -2264,21 +2287,30 @@ func forwardGenericRedPacketPayload(it wxparse.ForwardItem) map[string]any {
 
 func forwardMediaRefsFromHints(path []int, hints []map[string]any, family string) []map[string]any {
 	key := forwardPathString(path)
-	var out []map[string]any
+	var matched []map[string]any
+	var paths []string
 	for _, h := range hints {
 		if rowString(wcdb.Row(h), "source") != "message_forward_item" || rowString(wcdb.Row(h), "forward_path") != key || !agentHintMatchesFamily(h, family) {
 			continue
 		}
-		row := wcdb.Row{"media_read_hints": []map[string]any{h}}
-		paths := appendUniqueStrings(stringSliceAny(h["direct_readable_local_paths"]), stringSliceAny(h["decoded_local_paths"])...)
+		matched = append(matched, h)
+		paths = appendUniqueStrings(paths, stringSliceAny(h["direct_readable_local_paths"])...)
+		paths = appendUniqueStrings(paths, stringSliceAny(h["decoded_local_paths"])...)
 		for _, p := range stringSliceAny(h["local_paths"]) {
 			if directReadableMediaPath(family, p) {
 				paths = appendUniqueStrings(paths, p)
 			}
 		}
-		out = append(out, agentMediaRefsFromPaths(row, paths, false, family)...)
 	}
-	return out
+	if len(paths) == 0 {
+		return nil
+	}
+	// Keep every matching hint on the synthetic row so image quality scoring can
+	// compare dimensions/file sizes across source-message thumbnails, temp cache
+	// copies and Rec-record big/original images before returning a single best
+	// image to the agent.
+	row := wcdb.Row{"media_read_hints": matched}
+	return agentMediaRefsFromPaths(row, paths, false, family)
 }
 
 func forwardReferMsgPayload(ref wxparse.ForwardReferMsg) map[string]any {
@@ -3632,10 +3664,103 @@ func (s *server) buildMediaResourceOutput(rows []wcdb.Row, includeLocalPaths boo
 			item["media_read_hints"] = hints
 		}
 	}
+	// message_resource.db knows that a parent row is a forward_chat, but it
+	// does not contain the record XML or packed_info_data needed to expose the
+	// nested media. Rehydrate just those parent message rows from the live
+	// message shards, then reuse the same forward parser/resolver used by
+	// history/timeline. This keeps `media --local-id <forward>` consistent with
+	// the chat-reading surface instead of returning an empty shell.
+	s.attachForwardChatPayloadsToMediaItems(out)
 	if !includeDebug {
 		agentReadyMediaResourceOutput(out)
 	}
 	return out
+}
+
+func (s *server) attachForwardChatPayloadsToMediaItems(items []map[string]any) {
+	if s == nil || len(items) == 0 {
+		return
+	}
+	byTalker := map[string][]int64{}
+	for _, item := range items {
+		if rowString(wcdb.Row(item), "kind_name") != "forward_chat" {
+			continue
+		}
+		talker := rowString(wcdb.Row(item), "talker")
+		localID := rowInt64(wcdb.Row(item), "local_id")
+		if talker == "" || localID == 0 {
+			continue
+		}
+		byTalker[talker] = append(byTalker[talker], localID)
+	}
+	if len(byTalker) == 0 {
+		return
+	}
+
+	messageRows := map[string]wcdb.Row{}
+	for talker, ids := range byTalker {
+		ids = uniqueInt64s(ids)
+		tableName := "Msg_" + talkerHash(talker)
+		shards, err := s.findMsgDBs(tableName)
+		if err != nil {
+			continue
+		}
+		func() {
+			defer closeMsgDBs(shards)
+			for _, shard := range shards {
+				for start := 0; start < len(ids); start += 500 {
+					end := start + 500
+					if end > len(ids) {
+						end = len(ids)
+					}
+					chunk := ids[start:end]
+					ph := make([]string, len(chunk))
+					args := make([]any, 0, len(chunk))
+					for i, id := range chunk {
+						ph[i] = "?"
+						args = append(args, id)
+					}
+					rows, queryErr := shard.DB.Query(fmt.Sprintf(`SELECT local_id, server_id, create_time,
+						local_type, message_content, packed_info_data
+						FROM %s WHERE local_id IN (%s)`, quoteIdent(tableName), strings.Join(ph, ",")), args...)
+					if queryErr != nil {
+						continue
+					}
+					rows = enrichMessages(decodeFields(rows, "message_content"))
+					for _, row := range rows {
+						if rowString(row, "kind_name") != "forward_chat" {
+							continue
+						}
+						row["talker"] = talker
+						key := mediaMessageKey(talker, rowInt64(row, "local_id"), rowInt64(row, "server_id"), rowInt64(row, "create_time"))
+						if key != "" {
+							messageRows[key] = row
+						}
+					}
+				}
+			}
+		}()
+	}
+
+	for _, item := range items {
+		if rowString(wcdb.Row(item), "kind_name") != "forward_chat" {
+			continue
+		}
+		key := mediaMessageKey(
+			rowString(wcdb.Row(item), "talker"),
+			rowInt64(wcdb.Row(item), "local_id"),
+			rowInt64(wcdb.Row(item), "server_id"),
+			rowInt64(wcdb.Row(item), "create_time"),
+		)
+		row := messageRows[key]
+		if row == nil {
+			continue
+		}
+		s.attachMediaReadHintsToMessages([]wcdb.Row{row})
+		if forward := agentForwardChatPayload(row, nil); len(forward) > 0 {
+			item["forward_chat"] = forward
+		}
+	}
 }
 
 func agentReadyMediaResourceOutput(items []map[string]any) {
@@ -4023,15 +4148,23 @@ var (
 )
 
 func (s *server) decodeLocalImageForAgent(path string, siblingPaths []string) map[string]any {
-	if strings.ToLower(filepath.Ext(path)) != ".dat" {
-		return nil
-	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return map[string]any{
 			"decode_status": "decode_failed",
 			"decode_error":  err.Error(),
 		}
+	}
+	// 普通图片消息通常以 *.dat 保存；合并转发的完整图片则常落在
+	// Rec/<record-id>/Img/<dataitem-index>，没有扩展名，但文件本体仍然是
+	// 同一种 WeChat V4 图片容器。不要用扩展名决定是否可解码，改为同时
+	// 认可已知 V4 文件头。这样 GUI 已下载的大图不会因为“无后缀”被漏掉。
+	ext := strings.ToLower(filepath.Ext(path))
+	isV4 := len(data) >= len(wechatV4ImageHeader1) &&
+		(bytes.Equal(data[:len(wechatV4ImageHeader1)], wechatV4ImageHeader1) ||
+			bytes.Equal(data[:len(wechatV4ImageHeader2)], wechatV4ImageHeader2))
+	if ext != ".dat" && !isV4 {
+		return nil
 	}
 	decoded, ext, meta, status, err := s.decodeWechatImageDAT(data, siblingPaths)
 	out := map[string]any{}
@@ -5318,15 +5451,22 @@ func forwardXMLReadHints(s *server, row wcdb.Row, p map[string]any) []map[string
 	walk = func(items []wxparse.ForwardItem, prefix []int) {
 		for i, it := range items {
 			path := appendForwardPath(prefix, i)
-			if it.DataType == 2 {
-				pathKey := forwardPathString(path)
+			pathKey := forwardPathString(path)
+			family := forwardDataTypeMediaFamily(it.DataType)
+			if family != "" {
+				// 先保留 source message / message_resource 解析到的资源，再补父合并
+				// 转发自己的 Rec 缓存。二者都进入候选池，最终由 Agent 层按
+				// 分辨率/文件大小/缩略图标记选择质量最高的可读版本。
 				hints = append(hints, forwardHintsForKey(resourceHints, pathKey)...)
-				if !forwardHintHasReadableMedia(hints, pathKey, "image") {
-					if h := s.directImageReadHintByContentMD5(it.FullMD5, it.SrcMsgCreateTime); h != nil {
-						markForwardItemHint(h, pathKey, "image")
-						h["content_md5"] = strings.ToLower(strings.TrimSpace(it.FullMD5))
-						hints = append(hints, h)
-					}
+				if h := s.forwardRecordMediaReadHint(row, it, path, family); h != nil {
+					hints = append(hints, h)
+				}
+			}
+			if it.DataType == 2 && !forwardHintHasReadableMedia(hints, pathKey, "image") {
+				if h := s.directImageReadHintByContentMD5(it.FullMD5, it.SrcMsgCreateTime); h != nil {
+					markForwardItemHint(h, pathKey, "image")
+					h["content_md5"] = strings.ToLower(strings.TrimSpace(it.FullMD5))
+					hints = append(hints, h)
 				}
 			}
 			if len(it.NestedItems) > 0 {
@@ -5336,6 +5476,173 @@ func forwardXMLReadHints(s *server, row wcdb.Row, p map[string]any) []map[string
 	}
 	walk(items, nil)
 	return hints
+}
+
+func forwardDataTypeMediaFamily(dataType int) string {
+	switch dataType {
+	case 2:
+		return "image"
+	case 4:
+		return "video"
+	case 8:
+		return "file"
+	default:
+		return ""
+	}
+}
+
+var forwardRecordIDRe = regexp.MustCompile(`^[0-9a-fA-F]{16}$`)
+
+func forwardRecordIDCandidates(row wcdb.Row) []string {
+	var out []string
+	for _, value := range packedStrings(rowBytes(row, "packed_info_data")) {
+		value = strings.TrimSpace(value)
+		if forwardRecordIDRe.MatchString(value) {
+			out = appendUniqueStrings(out, strings.ToLower(value))
+		}
+	}
+	return out
+}
+
+func (s *server) forwardRecordIDFromRow(row wcdb.Row) string {
+	candidates := forwardRecordIDCandidates(row)
+	if len(candidates) == 0 {
+		return ""
+	}
+	if s == nil || s.cfg == nil || s.cfg.DBRoot == "" {
+		return candidates[0]
+	}
+	talker := rowString(row, "talker")
+	createTime := rowInt64(row, "create_time")
+	if talker == "" || createTime == 0 {
+		return candidates[0]
+	}
+	month := time.Unix(createTime, 0).Format("2006-01")
+	base := filepath.Join(s.cfg.DBRoot, "msg", "attach", talkerHash(talker), month, "Rec")
+	for _, recordID := range candidates {
+		if st, err := os.Stat(filepath.Join(base, recordID)); err == nil && st.IsDir() {
+			return recordID
+		}
+	}
+	return candidates[0]
+}
+
+func forwardRecordPathStem(path []int) string {
+	if len(path) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(path))
+	for _, n := range path {
+		if n < 0 {
+			return ""
+		}
+		parts = append(parts, strconv.Itoa(n))
+	}
+	return strings.Join(parts, "_")
+}
+
+func (s *server) forwardRecordMediaReadHint(row wcdb.Row, it wxparse.ForwardItem, path []int, family string) map[string]any {
+	paths := s.forwardRecordMediaPaths(row, it, path, family)
+	if len(paths) == 0 {
+		return nil
+	}
+	res := map[string]any{
+		"resource_family": family,
+		"local_paths":     paths,
+		"record_cache":    true,
+		"record_id":       s.forwardRecordIDFromRow(row),
+	}
+	s.attachLocalPathAgentFields(res, family, paths)
+	_, _, hints := mediaResourceReadHints([]map[string]any{res})
+	if len(hints) == 0 {
+		return nil
+	}
+	h := hints[0]
+	markForwardItemHint(h, forwardPathString(path), family)
+	h["record_cache"] = true
+	h["record_id"] = res["record_id"]
+	return h
+}
+
+func (s *server) forwardRecordMediaPaths(row wcdb.Row, it wxparse.ForwardItem, path []int, family string) []string {
+	if s == nil || s.cfg == nil || s.cfg.DBRoot == "" {
+		return nil
+	}
+	recordID := s.forwardRecordIDFromRow(row)
+	stem := forwardRecordPathStem(path)
+	createTime := rowInt64(row, "create_time")
+	talker := rowString(row, "talker")
+	if recordID == "" || stem == "" || createTime == 0 || talker == "" {
+		return nil
+	}
+	month := time.Unix(createTime, 0).Format("2006-01")
+	recordRoot := filepath.Join(s.cfg.DBRoot, "msg", "attach", talkerHash(talker), month, "Rec", recordID)
+	var candidates []string
+	switch family {
+	case "image", "cover":
+		base := filepath.Join(recordRoot, "Img")
+		for _, name := range []string{
+			stem,
+			stem + ".dat",
+			stem + ".jpg",
+			stem + ".jpeg",
+			stem + ".png",
+			stem + ".webp",
+			stem + "_h",
+			stem + "_h.dat",
+			stem + "_b",
+			stem + "_b.dat",
+			stem + "_t",
+			stem + "_t.dat",
+		} {
+			candidates = append(candidates, filepath.Join(base, name))
+		}
+	case "video":
+		base := filepath.Join(recordRoot, "V")
+		for _, name := range []string{stem + ".mp4", stem + ".mov", stem + ".m4v", stem, stem + ".dat"} {
+			candidates = append(candidates, filepath.Join(base, name))
+		}
+	case "file":
+		base := filepath.Join(recordRoot, "F")
+		name := firstNonEmpty(strings.TrimSpace(it.DataTitle), strings.TrimSpace(it.DataDesc))
+		if safeLeafName(name) {
+			candidates = append(candidates,
+				filepath.Join(base, stem, name),
+				filepath.Join(base, name),
+			)
+			// WeChat can choose a slot directory that is not identical to dataitem
+			// index. The parent record-id already scopes the search to one forward,
+			// so a basename + size match inside Rec/<id>/F is deterministic enough
+			// and avoids any account-wide same-name guessing.
+			_ = filepath.WalkDir(base, func(p string, d os.DirEntry, err error) error {
+				if err != nil || d == nil || d.IsDir() || d.Name() != name {
+					return nil
+				}
+				if it.DataSize > 0 {
+					st, statErr := d.Info()
+					if statErr != nil || st.Size() != it.DataSize {
+						return nil
+					}
+				}
+				candidates = append(candidates, p)
+				return nil
+			})
+		}
+	}
+	var out []string
+	seen := map[string]bool{}
+	for _, p := range candidates {
+		if p == "" || seen[p] {
+			continue
+		}
+		st, err := os.Stat(p)
+		if err != nil || st.IsDir() || st.Size() <= 0 {
+			continue
+		}
+		seen[p] = true
+		out = append(out, p)
+	}
+	return out
 }
 
 func markForwardItemHint(h map[string]any, pathKey, family string) {

@@ -1,5 +1,18 @@
 # 微信 Chat Exporter 第一阶段 ExecPlan
 
+## 2026-10-09：统一媒体候选 / 合并转发 Rec 回填
+
+本批目标不是只修某一条合并转发图片，而是统一“同一媒体实体的多种本地副本”选择逻辑：普通 source-message 资源、attach、temp 可读副本、合并转发 Rec 缓存、缩略图/中图/高清图、加密/已解码副本都作为候选，由 Agent 层输出当前本地可得的最佳可读版本。
+
+1. 从父 forward 消息 `packed_info_data` 提取 record-id，建立 `Rec/<record-id>` 的确定性根目录；forward item 的递归路径映射为 `0`、`7_1` 等 dataitem path。
+2. 图片：补 `Rec/Img/<index>`（含无扩展名 V4 容器）发现并复用现有 V4 AES-ECB + XOR 解码；不因原 source message 已有可读缩略图就提前停止，必须让 Rec 大图进入同一质量候选池。
+3. 视频：补 `Rec/V/<index>.mp4` 本地发现；文件：补 `Rec/F/<slot>/<name>`，搜索严格限制在单一 parent record-id 内，并要求可见文件名/文件大小一致，禁止跨账号或跨聊天同名盲猜。
+4. `history/timeline` 与 `media` 复用同一 forward parser/resolver；`media --local-id <forward>` 也要展开 `forward_chat.items[].images/videos/files`，不能只返回父消息空壳。
+5. Archive 现有 forward-file manifest 复用相同 `Rec/F` resolver，使 `local_ready/remote_pending` 与实时读取结论一致；本批不扩大 Archive 的图片 blob 设计范围。
+6. 自动化覆盖：无扩展名 Rec V4 图片解码、跨 hint 高清择优、Rec/V、Rec/F、forward file readable hint；真机回归覆盖实验上午图片、Transwell 显微镜图、Q4 ZIP/XLSX 文件。
+
+当前状态：实现和三组真机回归均已通过；剩余工作为最终代码审查、提交与正式安装验收。
+
 ## 2026-09-12：合并转发手动下载附件自动发现审计
 
 目标：解释并验证“用户已在微信 GUI 中手动下载合并转发附件，但 `wechat-cli` 仍返回 `forward_file_not_resolved`”的根因，并判断是否属于媒体发现/回填设计缺口。

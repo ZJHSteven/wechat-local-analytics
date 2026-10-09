@@ -991,15 +991,16 @@ func (s *server) archiveMediaItems(talker string, row wcdb.Row) []archiveMediaIt
 
 	if kind == "forward_chat" && raw != "" {
 		if items, err := wxparse.ForwardItems(raw, 5); err == nil {
-			out = append(out, s.archiveForwardFileItems(talker, createTime, items, "forward")...)
+			out = append(out, s.archiveForwardFileItems(talker, createTime, row, items, "forward", nil)...)
 		}
 	}
 	return out
 }
 
-func (s *server) archiveForwardFileItems(talker string, fallbackTime int64, items []wxparse.ForwardItem, prefix string) []archiveMediaItem {
+func (s *server) archiveForwardFileItems(talker string, fallbackTime int64, parentRow wcdb.Row, items []wxparse.ForwardItem, prefix string, recordPrefix []int) []archiveMediaItem {
 	var out []archiveMediaItem
 	for i, item := range items {
+		recordPath := appendForwardPath(recordPrefix, i)
 		itemKey := fmt.Sprintf("%s:%d", prefix, i)
 		if item.DataID != "" {
 			itemKey += ":" + item.DataID
@@ -1009,7 +1010,10 @@ func (s *server) archiveForwardFileItems(talker string, fallbackTime int64, item
 			if createTime == 0 {
 				createTime = fallbackTime
 			}
-			paths := s.localMediaPaths(talker, createTime, "file", "", []string{item.DataTitle})
+			paths := s.forwardRecordMediaPaths(parentRow, item, recordPath, "file")
+			if len(paths) == 0 {
+				paths = s.localMediaPaths(talker, createTime, "file", "", []string{item.DataTitle})
+			}
 			media := archiveMediaItem{
 				ItemKey:    itemKey,
 				Family:     "file",
@@ -1028,7 +1032,7 @@ func (s *server) archiveForwardFileItems(talker string, fallbackTime int64, item
 			out = append(out, media)
 		}
 		if len(item.NestedItems) > 0 {
-			out = append(out, s.archiveForwardFileItems(talker, fallbackTime, item.NestedItems, itemKey+":nested")...)
+			out = append(out, s.archiveForwardFileItems(talker, fallbackTime, parentRow, item.NestedItems, itemKey+":nested", recordPath)...)
 		}
 	}
 	return out
