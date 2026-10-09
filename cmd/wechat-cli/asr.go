@@ -161,6 +161,7 @@ func asrStatusData() map[string]any {
 	runtimeCfg, _ := loadASRRuntimeConfig()
 	venv, _ := defaultASRVenvDir()
 	venvPython := asrVenvPythonPath(venv)
+	httpCfg := capsWriterHTTPConfigFromEnv()
 	customCmd := envFirst("WECHAT_CLI_VOICE_TRANSCRIBE_CMD", "WX_MCP_VOICE_TRANSCRIBE_CMD")
 	fasterPython := findConfiguredPythonWithModule("faster_whisper")
 	whisperCLI := commandPath(firstNonEmpty(envFirst("WECHAT_CLI_WHISPER_CLI", "WX_MCP_WHISPER_CLI"), "whisper-cli"))
@@ -168,11 +169,31 @@ func asrStatusData() map[string]any {
 	silkDecoder := findSILKDecoder()
 	pysilkPython := findConfiguredPythonWithModule("pysilk")
 
-	asrReady := customCmd != "" || fasterPython != "" || (whisperCLI != "" && whisperModel != "")
+	httpHealthy := false
+	httpHealthError := ""
+	if httpCfg.Enabled {
+		// status 是诊断命令，不能因为笔记本上的 Gateway 没启动就卡 180 秒。
+		// 真正转写仍由 voiceCommandTimeout() 控制完整 job 生命周期；这里仅做一次
+		// 很短的控制面探测，告诉用户当前首选 backend 是否在线。
+		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		err := capsWriterHTTPHealth(ctx, nil, httpCfg)
+		cancel()
+		if err == nil {
+			httpHealthy = true
+		} else {
+			httpHealthError = err.Error()
+		}
+	}
+
+	legacyReady := customCmd != "" || fasterPython != "" || (whisperCLI != "" && whisperModel != "")
+	asrReady := httpHealthy || legacyReady
 	silkReady := silkDecoder != "" || pysilkPython != ""
 	warnings := []string{}
 	if !asrReady {
 		warnings = append(warnings, "local_asr_not_configured")
+	}
+	if httpCfg.Enabled && !httpHealthy {
+		warnings = append(warnings, "capswriter_http_unreachable")
 	}
 	if !silkReady {
 		warnings = append(warnings, "silk_decoder_missing_for_wechat_voice")
@@ -180,17 +201,37 @@ func asrStatusData() map[string]any {
 
 	next := ""
 	if !asrReady {
-		next = appName + " asr setup"
+		next = "Start CapsWriterGateway on " + httpCfg.BaseURL + ", or run " + appName + " asr setup for a local fallback."
 	} else if !silkReady {
 		next = appName + " asr setup, or install a WeChat SILK v3 decoder named silk_v3_decoder on PATH."
+	} else if httpCfg.Enabled && !httpHealthy && legacyReady {
+		next = "CapsWriter HTTP is unavailable; legacy ASR fallback remains ready."
 	} else {
-		next = "Voice ASR is ready for cached readable WeChat voice audio."
+		next = "Voice ASR is ready; WeChat native transcript is preferred, then CapsWriter HTTP, then legacy local fallbacks."
+	}
+
+	preferredEngine := "faster-whisper"
+	if httpCfg.Enabled {
+		preferredEngine = "capswriter-http"
+	} else if customCmd != "" {
+		preferredEngine = "custom"
 	}
 
 	return compactMap(map[string]any{
 		"ready":                 asrReady,
 		"wechat_voice_ready":    asrReady && silkReady,
-		"default_engine":        "faster-whisper",
+		"default_engine":        preferredEngine,
+		"preferred_engine":      preferredEngine,
+		"native_engine":         "wechat-native",
+		"fallback_order":        []string{"capswriter-http", "custom", "faster-whisper", "whisper.cpp"},
+		"capswriter_http": compactMap(map[string]any{
+			"enabled":                    httpCfg.Enabled,
+			"url":                        httpCfg.BaseURL,
+			"healthy":                    httpHealthy,
+			"health_error":               httpHealthError,
+			"bearer_configured":          httpCfg.BearerToken != "",
+			"cf_access_client_configured": httpCfg.CFAccessClientID != "" && httpCfg.CFAccessClientSecret != "",
+		}),
 		"default_model":         firstNonEmpty(runtimeCfg.Model, defaultFasterWhisperModel),
 		"default_language":      firstNonEmpty(runtimeCfg.Language, "zh"),
 		"default_device":        firstNonEmpty(runtimeCfg.Device, "cpu"),
