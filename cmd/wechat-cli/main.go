@@ -5103,29 +5103,56 @@ func writePCM16LEMonoWAV(path string, pcm []byte, sampleRate int) error {
 	return os.WriteFile(path, buf.Bytes(), 0o600)
 }
 
-func runLocalVoiceASR(audioPath string) (text, engine, model string, err error) {
+func runLocalVoiceASR(audioPath string) (voiceASRResult, error) {
+	var failures []string
+
+	// 生产首选是独立 CapsWriterGateway 的通用 HTTP Job API。这样 WeChatCLI、
+	// ClassFlow、N1 和临时脚本共享同一套文件 ASR 协议；CapsWriter Offline
+	// 本体仍然只维护 6016 ASR 内核，不承担微信或 HTTP 业务逻辑。
+	if capsWriterHTTPConfigFromEnv().Enabled {
+		result, err := runCapsWriterHTTPVoiceASR(audioPath)
+		if err == nil {
+			return result, nil
+		}
+		failures = append(failures, "capswriter-http: "+err.Error())
+	}
+
+	// 旧 custom 命令继续保留，既保证滚动升级兼容，也允许用户接自己的
+	// transcriber。HTTP Gateway 暂时不可达时，不应因此丢掉本来已有的 ASR 能力。
 	if cmd := envFirst("WECHAT_CLI_VOICE_TRANSCRIBE_CMD", "WX_MCP_VOICE_TRANSCRIBE_CMD"); cmd != "" {
-		text, err = runConfiguredVoiceTranscriber(cmd, audioPath)
-		return text, "custom", "", err
+		text, err := runConfiguredVoiceTranscriber(cmd, audioPath)
+		if err == nil {
+			return voiceASRResult{Text: text, Engine: "custom"}, nil
+		}
+		failures = append(failures, "custom: "+err.Error())
 	}
+
 	if python := findFasterWhisperPython(); python != "" {
-		return runFasterWhisperVoiceASRWithPython(python, audioPath)
+		text, engine, model, err := runFasterWhisperVoiceASRWithPython(python, audioPath)
+		if err == nil {
+			return voiceASRResult{Text: text, Engine: engine, Model: model}, nil
+		}
+		failures = append(failures, "faster-whisper: "+err.Error())
 	}
+
 	cli, err := exec.LookPath(firstNonEmpty(envFirst("WECHAT_CLI_WHISPER_CLI", "WX_MCP_WHISPER_CLI"), "whisper-cli"))
 	if err != nil {
-		return "", "local_asr", "", fmt.Errorf("whisper-cli not found")
+		failures = append(failures, "whisper.cpp: whisper-cli not found")
+		return voiceASRResult{}, fmt.Errorf("all voice ASR backends failed: %s", strings.Join(failures, "; "))
 	}
-	model = findWhisperModel()
+	model := findWhisperModel()
 	if model == "" {
-		return "", "whisper.cpp", "", fmt.Errorf("whisper model not found; set WECHAT_CLI_WHISPER_MODEL")
+		failures = append(failures, "whisper.cpp: model not found")
+		return voiceASRResult{}, fmt.Errorf("all voice ASR backends failed: %s", strings.Join(failures, "; "))
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), voiceCommandTimeout())
 	defer cancel()
 	out, err := exec.CommandContext(ctx, cli, "-m", model, "-f", audioPath, "-l", "auto", "-nt", "-np").Output()
 	if err != nil {
-		return "", "whisper.cpp", model, err
+		failures = append(failures, "whisper.cpp: "+err.Error())
+		return voiceASRResult{}, fmt.Errorf("all voice ASR backends failed: %s", strings.Join(failures, "; "))
 	}
-	return string(out), "whisper.cpp", model, nil
+	return voiceASRResult{Text: string(out), Engine: "whisper.cpp", Model: model}, nil
 }
 
 const defaultFasterWhisperModel = "large-v3"
