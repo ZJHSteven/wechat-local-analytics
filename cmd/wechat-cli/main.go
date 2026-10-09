@@ -2593,14 +2593,8 @@ func agentVoiceTranscript(r wcdb.Row, referenced bool) (map[string]any, []string
 	// 微信 GUI 自己已经完成的“语音转文字”会缓存回消息行 packed_info_data。
 	// 这条来源不需要解 SILK、不占 GPU，也不会和用户正在使用的前台 ASR
 	// 抢资源，因此优先级必须高于 wechat-cli 自己的外部转写缓存/引擎。
-	if packed, ok := r["packed_info_data"].([]byte); ok {
-		if text := wxparse.NativeVoiceTranscript(packed); text != "" {
-			return map[string]any{
-				"status": "ok",
-				"text":   text,
-				"engine": "wechat-native",
-			}, nil
-		}
+	if native := nativeVoiceTranscriptPayload(r); len(native) > 0 {
+		return native, nil
 	}
 	matched := false
 	var warnings []string
@@ -2644,7 +2638,22 @@ func agentVoiceTranscriptPayload(t map[string]any) map[string]any {
 		"engine":   stringMapValue(t, "engine"),
 		"model":    stringMapValue(t, "model"),
 		"language": stringMapValue(t, "language"),
+		"job_id":   stringMapValue(t, "job_id"),
 	})
+}
+
+// nativeVoiceTranscriptPayload 把微信自身已经完成的“语音转文字”统一成和外部
+// ASR 相同的 transcript 结构。rowBytes 同时兼容 []byte/string，避免不同查询路径
+// 对 packed_info_data 的具体 Go 类型不同而漏掉原生结果。
+func nativeVoiceTranscriptPayload(r wcdb.Row) map[string]any {
+	if text := wxparse.NativeVoiceTranscript(rowBytes(r, "packed_info_data")); text != "" {
+		return map[string]any{
+			"status": "ok",
+			"text":   text,
+			"engine": "wechat-native",
+		}
+	}
+	return nil
 }
 
 func voiceTranscriptTextFromHints(r wcdb.Row, referenced bool) string {
