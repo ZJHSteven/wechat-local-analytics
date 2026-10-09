@@ -4810,6 +4810,12 @@ func voiceXMLReadHint(s *server, r wcdb.Row, p map[string]any, source, role stri
 	if role != "" {
 		h["message_role"] = role
 	}
+	// 微信自己已经完成的“语音转文字”必须在任何外部 ASR 之前短路。
+	// 以前最终 agent 输出虽然会优先显示 wechat-native，但 media enrichment
+	// 仍可能已经先执行了外部 ASR；对 GPU/队列来说那依然是真实副作用。
+	if native := nativeVoiceTranscriptPayload(r); len(native) > 0 {
+		h["transcript"] = native
+	}
 	if s == nil {
 		if len(h) <= 4 {
 			return nil
@@ -4848,8 +4854,10 @@ func voiceXMLReadHint(s *server, r wcdb.Row, p map[string]any, source, role stri
 	}
 	h["local_paths"] = []string{path}
 	s.attachLocalPathAgentFields(h, "voice", []string{path})
-	if transcript := s.voiceTranscriptForAgent(path); len(transcript) > 0 {
-		h["transcript"] = transcript
+	if _, hasNative := h["transcript"]; !hasNative {
+		if transcript := s.voiceTranscriptForAgent(path); len(transcript) > 0 {
+			h["transcript"] = transcript
+		}
 	}
 	return h
 }
