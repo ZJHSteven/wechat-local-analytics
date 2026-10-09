@@ -1444,6 +1444,9 @@ func TestAgentMessagesExposesVoiceTranscript(t *testing.T) {
 }
 
 func TestVoiceTranscriptUsesConfiguredLocalASRAndCache(t *testing.T) {
+	// 本测试只验证 legacy custom transcriber；关闭 HTTP 首选，避免单测依赖
+	// 开发机上的 127.0.0.1:6017 是否恰好正在运行。
+	t.Setenv("WECHAT_CLI_ASR_HTTP_ENABLED", "0")
 	dir := t.TempDir()
 	wav := filepath.Join(dir, "voice.wav")
 	if err := os.WriteFile(wav, []byte("RIFF0000WAVEfmt "), 0o600); err != nil {
@@ -1490,6 +1493,7 @@ func TestVoiceTranscriptStrictReadOnlyDoesNotWriteCache(t *testing.T) {
 }
 
 func TestVoiceTranscriptPrefersFasterWhisperLargeV3AndRefreshesOldCache(t *testing.T) {
+	t.Setenv("WECHAT_CLI_ASR_HTTP_ENABLED", "0")
 	dir := t.TempDir()
 	t.Setenv("WECHAT_CLI_STATE_DIR", t.TempDir())
 	t.Setenv("WECHAT_CLI_FASTER_WHISPER_PYTHON", "")
@@ -1521,6 +1525,74 @@ func main() {
 		_ = os.WriteFile(args[0]+".args.log", []byte(args[4]+"/"+args[5]+"\n"), 0o600)
 		fmt.Println("大模型转写成功")
 	}
+}
+
+func TestRunLocalVoiceASRFallsBackWhenCapsWriterHTTPUnavailable(t *testing.T) {
+	dir := t.TempDir()
+	wav := filepath.Join(dir, "voice.wav")
+	if err := os.WriteFile(wav, []byte("RIFF0000WAVEfmt "), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// 先创建再关闭 httptest server，得到一个确定“连接被拒绝”的本地 URL，
+	// 比硬编码某个随机端口更适合并行测试。
+	dead := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	deadURL := dead.URL
+	dead.Close()
+	t.Setenv("WECHAT_CLI_ASR_HTTP_ENABLED", "1")
+	t.Setenv("WECHAT_CLI_ASR_HTTP_URL", deadURL)
+
+	custom := buildTestBinary(t, dir, "custom-asr-fallback", `package main
+
+import "fmt"
+
+func main() {
+	fmt.Println("HTTP挂了以后仍然可以转写")
+}
+`)
+	t.Setenv("WECHAT_CLI_VOICE_TRANSCRIBE_CMD", shellQuote(custom)+" {audio}")
+
+	got, err := runLocalVoiceASR(wav)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Engine != "custom" || strings.TrimSpace(got.Text) != "HTTP挂了以后仍然可以转写" {
+		t.Fatalf("fallback result = %#v", got)
+	}
+}
+
+func TestVoiceXMLReadHintExposesNativeTranscriptBeforeExternalASR(t *testing.T) {
+	packed := testVoiceProtoFieldBytes(5, append(
+		testVoiceProtoFieldVarint(1, 2),
+		testVoiceProtoFieldBytes(2, []byte("微信自己的转写"))...,
+	))
+	row := wcdb.Row{
+		"packed_info_data": packed,
+	}
+	hint := voiceXMLReadHint(nil, row, map[string]any{"duration_ms": int64(1200)}, "message_xml", "")
+	transcript := mapAny(hint["transcript"])
+	if transcript["status"] != "ok" || transcript["text"] != "微信自己的转写" || transcript["engine"] != "wechat-native" {
+		t.Fatalf("native transcript hint = %#v", transcript)
+	}
+}
+
+func testVoiceProtoFieldVarint(number int, value uint64) []byte {
+	out := testVoiceAppendProtoVarint(nil, uint64(number<<3))
+	return testVoiceAppendProtoVarint(out, value)
+}
+
+func testVoiceProtoFieldBytes(number int, value []byte) []byte {
+	out := testVoiceAppendProtoVarint(nil, uint64(number<<3|2))
+	out = testVoiceAppendProtoVarint(out, uint64(len(value)))
+	return append(out, value...)
+}
+
+func testVoiceAppendProtoVarint(dst []byte, value uint64) []byte {
+	for value >= 0x80 {
+		dst = append(dst, byte(value)|0x80)
+		value >>= 7
+	}
+	return append(dst, byte(value))
 }
 `)
 	if _, err := os.Stat(python + ".args.log"); err == nil {
