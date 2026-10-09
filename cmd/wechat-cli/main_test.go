@@ -1526,6 +1526,31 @@ func main() {
 		fmt.Println("大模型转写成功")
 	}
 }
+`)
+	if _, err := os.Stat(python + ".args.log"); err == nil {
+		t.Fatalf("unexpected stale args log at %s", python+".args.log")
+	}
+	t.Setenv("WX_MCP_FASTER_WHISPER_PYTHON", python)
+	t.Setenv("WX_MCP_FASTER_WHISPER_MODEL", "")
+	t.Setenv("WX_MCP_FASTER_WHISPER_LANGUAGE", "zh")
+	t.Setenv("WX_MCP_VOICE_TRANSCRIBE_CMD", "")
+
+	srv := &server{}
+	got := srv.voiceTranscriptForAgent(wav)
+	if got["status"] != "ok" || got["text"] != "大模型转写成功" || got["engine"] != "faster-whisper" || got["model"] != "large-v3" {
+		t.Fatalf("transcript = %#v", got)
+	}
+	if version, ok := integerArgValue(got["cache_version"]); !ok || version != voiceTranscriptCacheVersion {
+		t.Fatalf("cache version = %#v, want %d", got["cache_version"], voiceTranscriptCacheVersion)
+	}
+	args, err := os.ReadFile(python + ".args.log")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(args)) != "large-v3/zh" {
+		t.Fatalf("faster-whisper args = %q, want large-v3/zh", strings.TrimSpace(string(args)))
+	}
+}
 
 func TestRunLocalVoiceASRFallsBackWhenCapsWriterHTTPUnavailable(t *testing.T) {
 	dir := t.TempDir()
@@ -1593,31 +1618,6 @@ func testVoiceAppendProtoVarint(dst []byte, value uint64) []byte {
 		value >>= 7
 	}
 	return append(dst, byte(value))
-}
-`)
-	if _, err := os.Stat(python + ".args.log"); err == nil {
-		t.Fatalf("unexpected stale args log at %s", python+".args.log")
-	}
-	t.Setenv("WX_MCP_FASTER_WHISPER_PYTHON", python)
-	t.Setenv("WX_MCP_FASTER_WHISPER_MODEL", "")
-	t.Setenv("WX_MCP_FASTER_WHISPER_LANGUAGE", "zh")
-	t.Setenv("WX_MCP_VOICE_TRANSCRIBE_CMD", "")
-
-	srv := &server{}
-	got := srv.voiceTranscriptForAgent(wav)
-	if got["status"] != "ok" || got["text"] != "大模型转写成功" || got["engine"] != "faster-whisper" || got["model"] != "large-v3" {
-		t.Fatalf("transcript = %#v", got)
-	}
-	if version, ok := integerArgValue(got["cache_version"]); !ok || version != voiceTranscriptCacheVersion {
-		t.Fatalf("cache version = %#v, want %d", got["cache_version"], voiceTranscriptCacheVersion)
-	}
-	args, err := os.ReadFile(python + ".args.log")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.TrimSpace(string(args)) != "large-v3/zh" {
-		t.Fatalf("faster-whisper args = %q, want large-v3/zh", strings.TrimSpace(string(args)))
-	}
 }
 
 func TestASRSetupDryRunUsesStateVenv(t *testing.T) {
