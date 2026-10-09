@@ -12,7 +12,7 @@
 6. `wechat-cli asr status` 增加 HTTP Gateway 配置/健康状态，并把实际首选 fallback 说清楚；不再把 `default_engine=faster-whisper` 误导性地当成生产首选。
 7. 测试覆盖：native transcript short-circuit、HTTP submit/poll/completed、failed、timeout、幂等键、鉴权 header、HTTP 不可用后的 legacy fallback，以及一条真实微信语音端到端验收。
 
-当前状态：设计已确认；CapsWriterGateway 生产 `127.0.0.1:6017` 与异步 Job API 已由 ClassFlow/N1 真机验证，开始实现 WeChatCLI client。
+当前状态：实现、自动化测试与旁路 candidate 真机验收均已完成。真实微信样本分别验证 `wechat-native` 无外部 ASR 副作用，以及本地 VoiceInfo -> SILK/WAV -> `127.0.0.1:6017` async job -> `capswriter-http` transcript 全链路；仅剩从当前提交重建正式 `wechat-cli.exe`、用全局入口复验并推送分支。
 
 ## 2026-10-09：统一媒体候选 / 合并转发 Rec 回填
 
