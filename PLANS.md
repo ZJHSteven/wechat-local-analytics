@@ -1,5 +1,19 @@
 # 微信 Chat Exporter 第一阶段 ExecPlan
 
+## 2026-10-09：微信语音统一接入 CapsWriterGateway HTTP Job API
+
+目标：把 WeChatCLI 的语音 fallback 收口到已经稳定运行的通用 CapsWriterGateway，而不是继续把 Gateway 当成一个本机 CLI 子进程。最终读取语音时只暴露统一 transcript 语义：
+
+1. **微信原生转写永远优先**：若 `packed_info_data` 中存在完成态 transcript，直接返回 `engine=wechat-native`，不解码 SILK、不提交外部 ASR。
+2. **没有原生转写时走 HTTP Job API**：WeChatCLI 把本地微信 SILK 解成 WAV 后，向 `POST /v1/transcriptions` 发送 raw-body，并用稳定 `Idempotency-Key` 防止重复 GPU 任务；随后轮询 `GET /v1/transcriptions/{id}` 直到 completed/failed/timeout。
+3. 默认本机 endpoint 为 `http://127.0.0.1:6017`；支持 `WECHAT_CLI_ASR_HTTP_URL` 覆盖。鉴权支持可选 Bearer，以及 Cloudflare Access Client ID/Secret header，便于未来远端 Gateway，但本机 loopback 不要求凭据。
+4. HTTP Gateway 不可用或协议失败时，再按现有顺序回退到 `WECHAT_CLI_VOICE_TRANSCRIBE_CMD`、faster-whisper、whisper.cpp；因此不破坏跨平台/独立安装能力。
+5. transcript cache 升级版本并记录 `engine=capswriter-http`、gateway endpoint/job id；成功/no_speech 缓存继续复用，失败不永久缓存，服务恢复后可自动重试。
+6. `wechat-cli asr status` 增加 HTTP Gateway 配置/健康状态，并把实际首选 fallback 说清楚；不再把 `default_engine=faster-whisper` 误导性地当成生产首选。
+7. 测试覆盖：native transcript short-circuit、HTTP submit/poll/completed、failed、timeout、幂等键、鉴权 header、HTTP 不可用后的 legacy fallback，以及一条真实微信语音端到端验收。
+
+当前状态：设计已确认；CapsWriterGateway 生产 `127.0.0.1:6017` 与异步 Job API 已由 ClassFlow/N1 真机验证，开始实现 WeChatCLI client。
+
 ## 2026-10-09：统一媒体候选 / 合并转发 Rec 回填
 
 本批目标不是只修某一条合并转发图片，而是统一“同一媒体实体的多种本地副本”选择逻辑：普通 source-message 资源、attach、temp 可读副本、合并转发 Rec 缓存、缩略图/中图/高清图、加密/已解码副本都作为候选，由 Agent 层输出当前本地可得的最佳可读版本。
