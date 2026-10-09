@@ -4961,25 +4961,32 @@ func (s *server) voiceTranscriptForAgent(audioPath string) map[string]any {
 			"engine":        "local_asr",
 		}))
 	}
-	text, engine, model, err := runLocalVoiceASR(asrPath)
+	result, err := runLocalVoiceASR(asrPath)
 	status := "ok"
 	if err != nil {
 		status = "unavailable"
 	}
-	text = cleanVoiceTranscriptText(text)
+	text := cleanVoiceTranscriptText(result.Text)
 	if status == "ok" && text == "" {
 		status = "no_speech"
+	}
+	engine := result.Engine
+	if engine == "" {
+		engine = "local_asr"
 	}
 	return writeVoiceTranscriptCache(cachePath, compactMap(map[string]any{
 		"cache_version": voiceTranscriptCacheVersion,
 		"status":        status,
 		"text":          text,
 		"engine":        engine,
-		"model":         model,
+		"model":         result.Model,
+		"language":      result.Language,
+		"job_id":        result.JobID,
+		"endpoint":      result.Endpoint,
 	}))
 }
 
-const voiceTranscriptCacheVersion = 4
+const voiceTranscriptCacheVersion = 5
 
 func voiceTranscriptCacheUsable(cached map[string]any) bool {
 	if len(cached) == 0 {
