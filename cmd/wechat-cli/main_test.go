@@ -1462,14 +1462,15 @@ func main() {
 	fmt.Println("本地转写成功")
 }
 `)
-	t.Setenv("WX_MCP_VOICE_TRANSCRIBE_CMD", shellQuote(asr)+" {audio}")
+	t.Setenv("WECHAT_CLI_VOICE_TRANSCRIBE_CMD", shellQuote(asr)+" {audio}")
+	t.Setenv("WX_MCP_VOICE_TRANSCRIBE_CMD", "")
 
 	srv := &server{}
 	got := srv.voiceTranscriptForAgent(wav)
 	if got["status"] != "ok" || got["text"] != "本地转写成功" || got["engine"] != "custom" {
 		t.Fatalf("transcript = %#v", got)
 	}
-	t.Setenv("WX_MCP_VOICE_TRANSCRIBE_CMD", "false {audio}")
+	t.Setenv("WECHAT_CLI_VOICE_TRANSCRIBE_CMD", "false {audio}")
 	cached := srv.voiceTranscriptForAgent(wav)
 	if cached["status"] != "ok" || cached["text"] != "本地转写成功" {
 		t.Fatalf("cached transcript = %#v", cached)
