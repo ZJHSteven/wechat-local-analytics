@@ -193,7 +193,9 @@ wechat-cli asr setup --model large-v3
 wechat-cli asr status --pretty
 ```
 
-它会创建 `~/.wechat-cli/asr-venv`，安装 `faster-whisper` 与 `silk-python`。模型、语言、device 与 compute type 会持久化到本机 ASR 配置。首次模型下载可能占用数 GB；只安装依赖可加 `--skip-model-download`。
+读取优先级是：微信客户端已经完成的原生 transcript -> CapsWriterGateway HTTP Job API -> custom transcriber -> `faster-whisper` -> `whisper.cpp`。默认 Gateway 为 `http://127.0.0.1:6017`；可用 `WECHAT_CLI_ASR_HTTP_URL` 覆盖，`WECHAT_CLI_ASR_HTTP_ENABLED=0` 可关闭 HTTP 首选。远端 Gateway 可选配置 Bearer 或 Cloudflare Access Client ID/Secret；`asr status` 只显示是否配置，不回显 secret。
+
+`wechat-cli asr setup` 仍用于安装独立本地 fallback：它会创建 `~/.wechat-cli/asr-venv`，安装 `faster-whisper` 与 `silk-python`。模型、语言、device 与 compute type 会持久化到本机 ASR 配置。首次模型下载可能占用数 GB；只安装依赖可加 `--skip-model-download`。
 
 ## 微信助手
 

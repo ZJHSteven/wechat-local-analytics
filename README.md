@@ -239,7 +239,7 @@ Wetrace 自己仍可在用户明确要求时，把分析结果写入 `~/wetrace-
 - Wetrace 默认只统计图片和语音类型，不主动读取媒体内容。
 - 图片解密可能依赖当前账号的 `image_key` 或 `image_xor_key`，缺失时普通模式可尝试刷新并写入本地媒体缓存。
 - 严格只读模式不会刷新图片密钥或写解码缓存。
-- 语音转写是可选功能，使用本地 `faster-whisper` 与 SILK 解码器，不上传音频。
+- 语音读取优先复用微信客户端已经写回的“语音转文字”；没有原生文字时，已落盘的 SILK 会先在本机解码，再优先提交到本机 `CapsWriterGateway`（默认 `http://127.0.0.1:6017`）的统一异步 Job API。Gateway 不可用时才回退到 custom transcriber / `faster-whisper` / `whisper.cpp`。默认本机配置不会把音频上传到公网；若显式把 `WECHAT_CLI_ASR_HTTP_URL` 指向远端，则按该远端部署的网络与鉴权边界处理。
 - 未落盘或缺少可用解码链路的语音只能统计数量和时长，不能推测内容。
 
 ## 数据范围与截断
