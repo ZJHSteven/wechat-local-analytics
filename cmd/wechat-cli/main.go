@@ -3837,20 +3837,53 @@ func agentReadyMediaResource(res map[string]any) map[string]any {
 	paths := agentReadyMediaResourcePaths(res)
 	out := map[string]any{}
 	if len(paths) > 0 {
-		out["path"] = paths[0]
+		// 一个微信消息可能同时存在多个 MessageResourceDetail variant。
+		// 这些 sibling 资源在本地解析阶段可能共享同一组“当前可读文件”候选，
+		// 例如视频消息的某个 10 KB 封面 variant 也能看到完整 25 MB MP4。
+		//
+		// 因此精简输出不能把“当前 DB variant 的 size”机械地和“选中的本地 path”
+		// 拼在一起，否则会产生 path=完整视频、size=封面大小的自相矛盾结果。
+		// 这里先确定真正要暴露给 Agent 的 path，再让 size 跟随这个 path 的
+		// local_path_details.file_size；只有拿不到本地文件大小时才回退 DB size。
+		selectedPath := paths[0]
+		out["path"] = selectedPath
 		if typ := normalizedMediaResourceType(rowString(wcdb.Row(res), "resource_family")); typ != "" {
 			out["type"] = typ
 		}
-		for _, k := range []string{"size", "md5", "content_md5", "file_name", "file_names"} {
+		for _, k := range []string{"md5", "content_md5", "file_name", "file_names"} {
 			if v, ok := res[k]; ok {
 				out[k] = v
 			}
+		}
+		if size, ok := agentReadyMediaPathSize(res, selectedPath); ok {
+			out["size"] = size
+		} else if v, ok := res["size"]; ok {
+			out["size"] = v
 		}
 	}
 	if warnings := agentReadyMediaResourceWarnings(res, paths); len(warnings) > 0 {
 		out["warnings"] = warnings
 	}
 	return compactMap(out)
+}
+
+// agentReadyMediaPathSize 返回“最终实际暴露的本地文件”的大小，而不是某个
+// MessageResourceDetail sibling 自己声明的大小。local_path_details 在解析本地
+// 媒体时已经对文件执行过 Stat，因此优先复用它；若 selectedPath 是后续解码出的
+// 文件、没有对应 detail，再直接 Stat 一次作为兜底。
+func agentReadyMediaPathSize(res map[string]any, selectedPath string) (int64, bool) {
+	for _, detail := range mapSliceAny(res["local_path_details"]) {
+		if rowString(wcdb.Row(detail), "path") != selectedPath {
+			continue
+		}
+		if _, ok := detail["file_size"]; ok {
+			return rowInt64(wcdb.Row(detail), "file_size"), true
+		}
+	}
+	if st, err := os.Stat(selectedPath); err == nil && !st.IsDir() {
+		return st.Size(), true
+	}
+	return 0, false
 }
 
 func normalizedMediaResourceType(family string) string {

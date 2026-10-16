@@ -1269,6 +1269,47 @@ func TestAgentReadyMediaResourcesExposeOnlyReadableImagePath(t *testing.T) {
 	}
 }
 
+func TestAgentReadyVideoResourceSizeMatchesSelectedLocalPath(t *testing.T) {
+	// 复现 2026-10-16 真机样本：
+	// 同一视频消息的第一个 DB variant 自身 size 只有约 10 KB（封面量级），
+	// 但本地候选池同时包含完整 MP4 与 JPG。Agent 精简层会优先选择 MP4；
+	// 此时 size 必须来自 MP4 对应的 local_path_details，而不能继续沿用
+	// 当前 sibling variant 的 10 KB DB size。
+	const (
+		videoPath = "/tmp/debate-full.mp4"
+		coverPath = "/tmp/debate-thumb.jpg"
+		videoSize = int64(25054868)
+		coverSize = int64(10170)
+	)
+	res := map[string]any{
+		"resource_family":             "video",
+		"size":                        coverSize,
+		"direct_readable_local_paths": []string{videoPath, coverPath},
+		"local_paths":                 []string{videoPath, coverPath},
+		"local_path_details": []map[string]any{
+			{
+				"path":      videoPath,
+				"file_size": videoSize,
+			},
+			{
+				"path":      coverPath,
+				"file_size": coverSize,
+			},
+		},
+	}
+
+	got := agentReadyMediaResource(res)
+	if got["path"] != videoPath {
+		t.Fatalf("path = %#v, want %q", got["path"], videoPath)
+	}
+	if got["size"] != videoSize {
+		t.Fatalf("size = %#v, want selected MP4 size %d", got["size"], videoSize)
+	}
+	if got["type"] != "video" {
+		t.Fatalf("type = %#v, want video", got["type"])
+	}
+}
+
 func TestAgentReadyMediaResourcesHideUnreadableImageDAT(t *testing.T) {
 	items := []map[string]any{{
 		"kind_name":         "image",
