@@ -1,5 +1,15 @@
 # 微信 Chat Exporter 第一阶段 ExecPlan
 
+## 2026-10-16：普通视频资源精简输出元数据串位修复
+
+背景：真实微信群视频消息同时存在多个 `MessageResourceDetail` variant。当前本地解析会为同一 video family 的资源行补齐同一组可读候选（完整 MP4 + 封面 JPG）；Agent 精简层随后选择完整 MP4 作为 `path`，却继续复制当前 DB variant 行的 `size`。当先到的是封面/低阶 variant 时，就会出现“25 MB MP4 路径 + 10 KB size”的自相矛盾输出，并因按 path 去重而把后续正确 size 的 sibling 资源丢掉。
+
+本批目标：
+1. Agent 精简资源的 `size` 必须描述实际返回的 `path`，优先使用该 path 对应 `local_path_details.file_size`，不得盲抄 sibling/variant 的 DB size。
+2. 保持现有多 variant 本地发现逻辑不变：视频完整文件仍优先作为可读 `videos[].path` / `resources[].path`；封面只作为候选详情，不把本次问题误判为“视频缓存目录未覆盖”。
+3. 增加回归测试，复现同一视频两个 variant、共享 MP4/JPG 候选、首行 size=封面大小的真实结构，确保精简后 path/size 一致。
+4. 用 2026-10-16 防艾群 local_id=443 真机样本复验普通 `wechat-cli media`，应返回完整 MP4 路径及其真实文件大小。
+
 ## 2026-10-09：微信语音统一接入 CapsWriterGateway HTTP Job API
 
 目标：把 WeChatCLI 的语音 fallback 收口到已经稳定运行的通用 CapsWriterGateway，而不是继续把 Gateway 当成一个本机 CLI 子进程。最终读取语音时只暴露统一 transcript 语义：
